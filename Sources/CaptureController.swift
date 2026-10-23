@@ -272,9 +272,28 @@ extension CaptureController: ARSessionDelegate {
 
     nonisolated func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
         Task { @MainActor [weak self] in
-            guard let self, self.state == .recording else { return }
-            if case .normal = camera.trackingState { return }
-            self.statusLine = "Tracking is onvoldoende; opname wacht op stabiele positie."
+            guard let self, self.state == .recording || self.state == .framing else { return }
+            switch camera.trackingState {
+            case .normal:
+                // The former implementation left the last limited-state text on
+                // screen forever, even after ARKit had recovered and fusion was
+                // running again.
+                if self.state == .recording {
+                    self.statusLine = "Tracking stabiel. Metingen worden vastgelegd."
+                }
+            case .limited(.initializing):
+                self.statusLine = "LiDAR wordt kort gestabiliseerd; houd de iPad rustig."
+            case .limited(.excessiveMotion):
+                self.statusLine = "Beweeg langzamer; opname wacht tot tracking weer stabiel is."
+            case .limited(.insufficientFeatures):
+                self.statusLine = "Richt kort op een rand, vloertextuur of ander herkenbaar detail."
+            case .limited(.relocalizing):
+                self.statusLine = "Tracking herstelt. Houd de iPad bij het scanvolume en wacht even."
+            case .notAvailable:
+                self.state = .failed("AR-tracking is niet beschikbaar op dit apparaat.")
+            @unknown default:
+                self.statusLine = "Trackingstatus wijzigt; opname wacht op een stabiele positie."
+            }
         }
     }
 
