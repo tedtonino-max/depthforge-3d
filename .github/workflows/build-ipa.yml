@@ -1,0 +1,50 @@
+name: Build DepthForge 3D IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: DepthForge3D
+        run: xcodegen generate
+
+      - name: Build unsigned iPadOS app
+        working-directory: DepthForge3D
+        run: |
+          xcodebuild \
+            -project DepthForge3D.xcodeproj \
+            -scheme DepthForge3D \
+            -configuration Debug \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package IPA
+        working-directory: DepthForge3D
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Debug-iphoneos/DepthForge3D.app Payload/
+          ditto -c -k --sequesterRsrc --keepParent Payload DepthForge3D-unsigned.ipa
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: depthforge3d-unsigned-ipa
+          path: DepthForge3D/DepthForge3D-unsigned.ipa
+          if-no-files-found: error
