@@ -83,3 +83,16 @@ xcodebuild -project DepthForge3D.xcodeproj -scheme DepthForge3D \
 Zie `VALIDATION.md` voor de expliciete grenzen van softwaretests en het vereiste
 iPad-protocol. LiDAR-kwaliteit en de visuele aansluiting op een echt object
 kunnen niet met alleen een groene build worden bewezen.
+
+## Gerichte correctie na iPad-feedback
+
+- Kamer: kies Hele kamer of Gebied schilderen. In de tweede modus start de
+  acquisitie pas na bevestiging; de geschilderde oppervlakken begrenzen de PLY.
+- Kwaststreken vormen een unie van maximaal 128 oppervlakgebonden markeringen,
+  met instelbare grootte. Het is geen vaste cirkel.
+- Consensuspunten worden verbonden tot zichtbare meetlijnen; naburige vlakken
+  mogen geen dieptesprongen overbruggen. Camerabeweging verbergt niet alles.
+- Een wereldindex hergebruikt overlappende elementen. Tijdelijke, onbevestigde
+  elementen maken bij capaciteit plaats voor nieuwe waarnemingen. De harde
+  elementlimiet blijft bestaan; de melding noemt deze nu terecht de scankaart.
+- Ruwe cameraframes blijven volledig; gebiedsselectie begrenst de 3D-geometrie.

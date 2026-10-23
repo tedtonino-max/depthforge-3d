@@ -67,9 +67,21 @@ struct DetailZone: Codable, Equatable {
     var normal: Vec3
     var radius: Float = 0.35
     var halfDepth: Float = 0.10
+    var brush: [DetailDab] = []
     func contains(_ p: Vec3) -> Bool {
+        if !brush.isEmpty { return brush.contains { $0.contains(p) } }
         let delta = p - center, along = dot(delta, normal)
         return abs(along) <= halfDepth && dot(delta, delta) - along * along <= radius * radius
+    }
+}
+
+struct DetailDab: Codable, Equatable {
+    var center: Vec3
+    var normal: Vec3
+    var radius: Float = 0.06
+    func contains(_ p: Vec3) -> Bool {
+        let delta = p - center, along = dot(delta, normal)
+        return abs(along) <= 0.04 && dot(delta, delta) - along * along <= radius * radius
     }
 }
 
@@ -83,6 +95,7 @@ struct DepthInput {
     var objectVolume: ObjectScanVolume?
     var detailZone: DetailZone?
     var isObject = true
+    var selectionOnly = false
     var baseStride = 2
     var detailStride = 1
     var processingBudget: Double = 0.10
@@ -123,7 +136,7 @@ enum ScanAdvice: String {
     case ready = "Deze zichtbare zone is goed genoeg om op te slaan"
     case focus = "Kies een detailzone op een wand of vloer"
     case budget = "Opname vertraagd; houd de iPad even stil"
-    case capacity = "Geheugenlimiet bereikt; sla deze scan op"
+    case capacity = "Scankaart vol; sla dit deel op"
 }
 
 struct SurfaceQuality: Equatable {
@@ -154,4 +167,6 @@ struct SurfaceUpdate {
     var quality: SurfaceQuality
     var visibleSurfels: [Surfel]
     var elapsed: Double
+    var camera: DepthCamera? = nil
+    var triangles: [Int32] = []
 }

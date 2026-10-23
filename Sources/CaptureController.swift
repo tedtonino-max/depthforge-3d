@@ -21,6 +21,10 @@ final class CaptureController: NSObject, ObservableObject {
     @Published private(set) var resourceNotice: String?
     @Published private(set) var roomNotice: String?
     @Published var captureProfile: CaptureProfile = .maximumGeometry
+    @Published var selectedAreaOnly = false
+    @Published var brushRadius: Float = 0.08
+    @Published private(set) var meshFaces = 0
+    private var lastBrushTime = -Double.infinity
     @Published var captureTarget: CaptureTarget = .object
     @Published var showShareSheet = false
     @Published private(set) var shareURL: URL?
@@ -28,8 +32,8 @@ final class CaptureController: NSObject, ObservableObject {
         didSet {
             if !showSurface { surfaceOverlay.hide() }
             else if let lastUpdate, let lastPose, trackingReady {
-                surfaceOverlay.show(lastUpdate.visibleSurfels, pose: lastPose, volume: objectScanVolume)
-                if let frame = sceneView.session.currentFrame { surfaceOverlay.hideIfViewChanged(CameraPose(frame.camera.transform)) }
+                surfaceOverlay.show(lastUpdate, pose: lastPose, volume: objectScanVolume)
+                if let frame = sceneView.session.currentFrame { surfaceOverlay.refreshVisibility(frame) }
             }
         }
     }
@@ -68,7 +72,7 @@ final class CaptureController: NSObject, ObservableObject {
             state = .failed("Dit apparaat ondersteunt geen LiDAR-scans."); return
         }
         generation = UUID(); trackingReady = false; finishStarted = false
-        photos = []; savedFrames = 0; quality = SurfaceQuality(); roomNotice = nil
+        photos = []; savedFrames = 0; meshFaces = 0; quality = SurfaceQuality(); roomNotice = nil
         resourceNotice = nil; objectScanVolume = nil; detailZone = nil; pendingZone = nil
         choosingDetail = false; shareURL = nil; scanRoot = nil; readyFrames = 0
         surfaceOverlay.clear(); volumeOverlay.reset(); zoneOverlay.clear()
@@ -133,10 +137,10 @@ final class CaptureController: NSObject, ObservableObject {
                 switch result {
                 case .success(let root):
                     self.scanRoot = root
-                    if self.captureTarget == .room { self.beginRoomCapture() }
+                    if self.captureTarget == .room && !self.selectedAreaOnly { self.beginRoomCapture() }
                     self.ensureDepthConfiguration()
                     self.state = .recording
-                    self.choosingDetail = self.captureTarget == .room
+                    self.choosingDetail = self.captureTarget == .room && self.selectedAreaOnly
                     self.statusLine = self.choosingDetail ? ScanAdvice.focus.rawValue : ScanAdvice.holdSteady.rawValue
                 case .failure(let error): self.fail(error)
                 }
@@ -147,10 +151,12 @@ final class CaptureController: NSObject, ObservableObject {
     func chooseDetail() {
         guard state == .recording else { return }
         choosingDetail = true; pendingZone = nil; readyFrames = 0
-        statusLine = "Tik op het oppervlak dat je extra wilt meten"
+        statusLine = "Schilder met je vinger over het gewenste gebied"
     }
     func selectDetail(at point: CGPoint) {
-        guard choosingDetail, state == .recording, let frame = sceneView.session.currentFrame else { return }
+        guard choosingDetail, state == .recording, let frame = sceneView.session.currentFrame,
+              frame.timestamp - lastBrushTime > 0.04 else { return }
+        lastBrushTime = frame.timestamp
         guard let zone = DepthSelection.zone(frame: frame, point: point, viewport: sceneView.bounds.size,
             orientation: sceneView.window?.windowScene?.interfaceOrientation ?? .portrait) else {
             statusLine = "Dit punt heeft nog geen betrouwbare diepte; kies een naburig oppervlak"; return
@@ -158,8 +164,12 @@ final class CaptureController: NSObject, ObservableObject {
         if captureTarget == .object, objectScanVolume?.contains(zone.center) != true {
             statusLine = "Kies een detail binnen het scanvolume"; return
         }
-        pendingZone = zone; zoneOverlay.show(zone, confirmed: false)
-        statusLine = "Bevestig deze detailzone"
+        var painted = pendingZone ?? zone
+        if painted.brush.contains(where: { length($0.center - zone.center) < brushRadius * 0.45 }) { return }
+        guard painted.brush.count < 128 else { statusLine = "Gebied gemarkeerd; start de scan of wis de selectie"; return }
+        painted.brush.append(DetailDab(center: zone.center, normal: zone.normal, radius: brushRadius))
+        pendingZone = painted; zoneOverlay.show(painted, confirmed: false)
+        statusLine = "Geschilderd gebied geselecteerd"
     }
     func confirmDetail() {
         guard let zone = pendingZone else { return }
@@ -167,7 +177,13 @@ final class CaptureController: NSObject, ObservableObject {
         quality = SurfaceQuality(); zoneOverlay.show(zone, confirmed: true)
         statusLine = "Houd de detailzone in beeld en beweeg daarna zijwaarts"
     }
+    func clearPaint() {
+        pendingZone = nil; zoneOverlay.clear(); statusLine = "Schilder opnieuw over het gewenste gebied"
+    }
     func cancelDetail() {
+        if captureTarget == .room && selectedAreaOnly && detailZone == nil {
+            statusLine = "Markeer eerst een gebied om deze scan te starten"; return
+        }
         choosingDetail = false; pendingZone = nil
         if let zone = detailZone { zoneOverlay.show(zone, confirmed: true) } else { zoneOverlay.clear() }
         statusLine = captureTarget == .room && detailZone == nil ? ScanAdvice.focus.rawValue : ScanAdvice.holdSteady.rawValue
@@ -185,11 +201,12 @@ final class CaptureController: NSObject, ObservableObject {
     }
     func review() {
         guard state == .recording || state == .paused else { return }
+        guard !(captureTarget == .room && selectedAreaOnly && detailZone == nil) else { return }
         state = .review; choosingDetail = false; sceneView.session.pause(); pipeline.resetStability()
         statusLine = "Controleer het bevestigde oppervlak; ontbrekend detail blijft open"
         if let lastUpdate, let lastPose, showSurface {
-            surfaceOverlay.show(lastUpdate.visibleSurfels, pose: lastPose, volume: objectScanVolume)
-            if let frame = sceneView.session.currentFrame { surfaceOverlay.hideIfViewChanged(CameraPose(frame.camera.transform)) }
+            surfaceOverlay.show(lastUpdate, pose: lastPose, volume: objectScanVolume)
+            if let frame = sceneView.session.currentFrame { surfaceOverlay.refreshVisibility(frame) }
         }
     }
     func finish() {
@@ -272,8 +289,9 @@ final class CaptureController: NSObject, ObservableObject {
     private func receive(_ frame: ARFrame) {
         guard state == .recording, case .normal = frame.camera.trackingState else { gate.release(); return }
         trackingReady = true
-        let pose = CameraPose(frame.camera.transform)
-        surfaceOverlay.hideIfViewChanged(pose)
+        if choosingDetail { gate.release(); return }
+        if captureTarget == .room && selectedAreaOnly && detailZone == nil { gate.release(); return }
+        if showSurface { surfaceOverlay.refreshVisibility(frame) }
         if frame.timestamp - lastConfigurationCheck > 1 {
             lastConfigurationCheck = frame.timestamp; ensureDepthConfiguration()
         }
@@ -289,7 +307,7 @@ final class CaptureController: NSObject, ObservableObject {
         if frame.timestamp - lastSaved > desired * 1.8 && lastSaved > 0 { skipped += 1 }
         lastSaved = frame.timestamp
         let token = generation, selectedZone = detailZone?.id
-        pipeline.process(frame: frame, target: captureTarget, zone: detailZone,
+        pipeline.process(frame: frame, target: captureTarget, zone: detailZone, selectionOnly: captureTarget == .room && selectedAreaOnly,
             stride: thermal == .serious ? 4 : captureProfile.sampleStride,
             orientation: imageOrientation, skipped: skipped) { [weak self, gate] result in
             Task { @MainActor in
@@ -301,20 +319,21 @@ final class CaptureController: NSObject, ObservableObject {
                     if let photo = output.photo { self.photos.append(photo) }
                     self.interval = min(1, max(self.captureProfile.frameInterval, output.duration * 1.2))
                     self.resourceNotice = output.surface.quality.capacityReached
-                        ? "Geheugenlimiet bereikt; bestaande oppervlakken worden nog verfijnd"
+                        ? "Scankaart vol; bestaande geometrie wordt nog verfijnd"
                         : (output.duration > 0.25 || output.surface.quality.limited || output.reducedDetail || thermal == .serious
                            ? "Lager opnametempo om camera en opslag soepel te houden" : nil)
                     guard selectedZone == self.detailZone?.id else { return }
                     self.quality = output.surface.quality
+                    self.meshFaces = output.surface.triangles.count / 3
                     self.lastUpdate = output.surface; self.lastPose = output.pose
                     if self.showSurface, self.trackingReady, self.state == .recording {
-                        self.surfaceOverlay.show(output.surface.visibleSurfels, pose: output.pose, volume: self.objectScanVolume)
+                        self.surfaceOverlay.show(output.surface, pose: output.pose, volume: self.objectScanVolume)
                         if let current = self.sceneView.session.currentFrame {
-                            self.surfaceOverlay.hideIfViewChanged(CameraPose(current.camera.transform))
+                            self.surfaceOverlay.refreshVisibility(current)
                         }
                     }
                     guard self.state == .recording, self.trackingReady, !self.choosingDetail else { return }
-                    if self.captureTarget == .room && self.detailZone == nil { self.statusLine = ScanAdvice.focus.rawValue; return }
+
                     self.readyFrames = self.quality.advice == .ready ? self.readyFrames + 1 : 0
                     self.statusLine = self.quality.advice == .ready && self.readyFrames < 3
                         ? ScanAdvice.holdSteady.rawValue : self.quality.advice.rawValue

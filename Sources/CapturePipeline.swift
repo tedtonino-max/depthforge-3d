@@ -25,31 +25,35 @@ final class CapturePipeline {
     private var photoCount = 0
     private var detailStride = 1
     private var fastFrames = 0
+    private var selectedBoundary: DetailZone?
 
     func begin(volume: ObjectScanVolume?, device: String, completion: @escaping (Result<URL, Error>) -> Void) {
         queue.async {
             do {
                 self.fusion.reset(); self.selector = PhotoSelector(); self.sequence = 0
                 self.volume = volume; self.activeZone = nil; self.photoTarget = nil; self.photoCount = 0
-                self.detailStride = 1; self.fastFrames = 0
+                self.detailStride = 1; self.fastFrames = 0; self.selectedBoundary = nil
                 completion(.success(try self.store.beginNewScan(objectVolume: volume, device: device)))
             } catch { completion(.failure(error)) }
         }
     }
 
-    func process(frame: ARFrame, target: CaptureTarget, zone: DetailZone?, stride: Int,
+    func process(frame: ARFrame, target: CaptureTarget, zone: DetailZone?, selectionOnly: Bool, stride: Int,
                  orientation: CGImagePropertyOrientation, skipped: Int,
                  completion: @escaping (Result<PipelineResult, Error>) -> Void) {
         queue.async {
             autoreleasepool {
                 let start = Date.timeIntervalSinceReferenceDate
-                guard let input = self.fusion.input(frame: frame, target: target, volume: self.volume,
+                guard var input = self.fusion.input(frame: frame, target: target, volume: self.volume,
                     zone: zone, stride: stride, detailStride: self.detailStride, budget: 0.09) else {
                     completion(.failure(CaptureError.noDepth)); return
                 }
+                input.selectionOnly = selectionOnly
                 if self.activeZone != zone?.id {
+                    if selectionOnly { self.fusion.reset() }
                     self.activeZone = zone?.id; self.selector = PhotoSelector(); self.photoTarget = nil
                 }
+                self.selectedBoundary = selectionOnly ? zone : nil
                 if let zone { self.store.register(zone) }
                 let update = self.fusion.surface.integrate(input)
                 if update.quality.limited {
@@ -96,7 +100,7 @@ final class CapturePipeline {
             do {
                 guard let root = self.store.root else { throw CocoaError(.fileNoSuchFile) }
                 let url = root.appendingPathComponent("exports/fused-surface.ply")
-                try self.fusion.plyData(volume: self.volume).write(to: url, options: .atomic)
+                try self.fusion.surface.plyData(volume: self.volume, selection: self.selectedBoundary).write(to: url, options: .atomic)
                 try self.store.close(roomPlanFile: roomFile, skipped: skipped)
                 completion(.success(url))
             } catch { completion(.failure(error)) }

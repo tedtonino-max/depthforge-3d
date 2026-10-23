@@ -173,7 +173,6 @@ final class SurfaceTests: XCTestCase {
         for i in 2...10 { result = fusion.integrate(plane(time: Double(i))) }
         XCTAssertLessThanOrEqual(fusion.surfels.count, 80)
         XCTAssertLessThanOrEqual(result.visibleSurfels.count, 20)
-        XCTAssertTrue(result.quality.capacityReached)
         XCTAssertNotEqual(result.quality.advice, .ready)
         fusion.reset()
         XCTAssertTrue(fusion.surfels.isEmpty)
@@ -187,5 +186,51 @@ final class SurfaceTests: XCTestCase {
         let result = fusion.integrate(frame)
         XCTAssertTrue(result.quality.limited)
         XCTAssertNotEqual(result.quality.advice, .ready)
+    }
+
+    func testBrushUnionClipsRoomGeometryAndExport() {
+        var zone = DetailZone(center: Vec3(-0.2, 0, -1), normal: Vec3(0, 0, 1))
+        zone.brush = [DetailDab(center: Vec3(-0.2, 0, -1), normal: Vec3(0, 0, 1), radius: 0.1),
+                      DetailDab(center: Vec3(0.2, 0, -1), normal: Vec3(0, 0, 1), radius: 0.1)]
+        XCTAssertFalse(zone.contains(Vec3(0, 0, -1)))
+        let fusion = SurfelFusion()
+        for i in 1...10 {
+            var frame = plane(time: Double(i)); frame.detailZone = zone; frame.selectionOnly = true
+            _ = fusion.integrate(frame)
+        }
+        XCTAssertGreaterThan(fusion.surfels.count, 20)
+        XCTAssertTrue(fusion.surfels.values.allSatisfy { zone.contains($0.position) })
+        let text = String(decoding: fusion.plyData(volume: nil, selection: zone), as: UTF8.self)
+        let rows = text.components(separatedBy: "end_header\n")[1].split(separator: "\n")
+        XCTAssertFalse(rows.isEmpty)
+        for row in rows {
+            let v = row.split(separator: " ").compactMap { Float($0) }
+            XCTAssertTrue(zone.contains(Vec3(v[0], v[1], v[2])))
+        }
+    }
+
+    func testConnectedMeshUsesConsensusAndDoesNotBridgeDepthJump() {
+        let fusion = SurfelFusion()
+        var result = fusion.integrate(plane(time: 1))
+        XCTAssertTrue(result.triangles.isEmpty)
+        for i in 2...12 {
+            var frame = plane(time: Double(i))
+            for y in 0..<camera.height { for x in 32..<camera.width { frame.depths[y * camera.width + x] = 2 } }
+            result = fusion.integrate(frame)
+        }
+        XCTAssertGreaterThan(result.triangles.count, 30)
+        for i in stride(from: 0, to: result.triangles.count, by: 3) {
+            let v = (0..<3).map { result.visibleSurfels[Int(result.triangles[i + $0])] }
+            XCTAssertTrue(v.allSatisfy(\.isStable))
+            XCTAssertLessThan(abs(v[0].position.z - v[1].position.z), 0.05)
+            XCTAssertLessThan(abs(v[0].position.z - v[2].position.z), 0.05)
+        }
+    }
+
+    func testSelectedRoomCannotStartWithoutPaint() {
+        let fusion = SurfelFusion()
+        var frame = plane(time: 1); frame.selectionOnly = true
+        _ = fusion.integrate(frame)
+        XCTAssertTrue(fusion.surfels.isEmpty)
     }
 }

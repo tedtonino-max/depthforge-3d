@@ -34,7 +34,7 @@ struct CaptureScreen: View {
             if scanner.state == .framing { FloorVolumePicker().ignoresSafeArea() }
             if scanner.choosingDetail {
                 Color.clear.contentShape(Rectangle()).ignoresSafeArea()
-                    .gesture(SpatialTapGesture().onEnded { scanner.selectDetail(at: $0.location) })
+                    .gesture(DragGesture(minimumDistance: 0).onChanged { scanner.selectDetail(at: $0.location) })
             }
             VStack(spacing: 12) {
                 HStack(alignment: .top) {
@@ -108,20 +108,24 @@ struct CaptureScreen: View {
             panel {
                 Text(scanner.statusLine).font(.headline).accessibilityAddTraits(.updatesFrequently)
                 if scanner.choosingDetail {
-                    Text("De ring kiest een oppervlak van ongeveer 70 cm breed. Binnen de ring meten we dichter en beoordelen we het detail afzonderlijk.")
+                    Text(scanner.captureTarget == .room && scanner.selectedAreaOnly ? "Schilder welk deel van de wand, vloer of kamer in deze scan hoort." : "Schilder over het detail dat je extra wilt meten.")
                         .font(.caption).foregroundStyle(.secondary)
                     HStack {
-                        Button("Terug", action: scanner.cancelDetail).buttonStyle(.bordered)
+                        Button("Wissen", action: scanner.clearPaint).buttonStyle(.bordered)
+                        Slider(value: $scanner.brushRadius, in: 0.04...0.20).frame(maxWidth: 130).accessibilityLabel("Kwastgrootte")
                         Spacer()
-                        Button("Bevestig detailzone", action: scanner.confirmDetail)
+                        Button("Start scan", action: scanner.confirmDetail)
                             .buttonStyle(.borderedProminent).disabled(scanner.pendingZone == nil)
                     }
                 } else {
+                    if scanner.detailZone != nil {
+                        Text("Geschilderd gebied · \(scanner.quality.stable) bevestigde metingen in beeld").font(.caption)
+                    }
                     if let notice = scanner.resourceNotice {
                         Text(notice).font(.caption).foregroundStyle(.orange)
                     }
                     HStack {
-                        Button(action: scanner.chooseDetail) { Label("Detailzone", systemImage: "scope") }
+                        Button(action: scanner.chooseDetail) { Label(scanner.selectedAreaOnly && scanner.captureTarget == .room ? "Gebied aanpassen" : "Detail schilderen", systemImage: "paintbrush.pointed") }
                             .buttonStyle(.bordered)
                         Button(action: scanner.pauseOrResume) { Image(systemName: "pause.fill") }
                             .buttonStyle(.bordered).accessibilityLabel("Pauzeer")
@@ -142,7 +146,7 @@ struct CaptureScreen: View {
         case .review:
             panel {
                 Text("Controleer je scan").font(.headline)
-                Text("Mint toont alleen herhaald bevestigde oppervlakken. Open plekken zijn nog niet betrouwbaar gemeten. Bekijk ook de onderkant en dunne delen voordat je opslaat.")
+                Text("De meetlijnen tonen alleen herhaald bevestigde oppervlakken. Open plekken zijn nog niet betrouwbaar gemeten. Bekijk ook de onderkant en dunne delen voordat je opslaat.")
                     .font(.subheadline).foregroundStyle(.secondary)
                 Text(scanner.quality.advice.rawValue).font(.caption.weight(.semibold))
                 Toggle("Toon bevestigd oppervlak", isOn: $scanner.showSurface)
@@ -183,7 +187,13 @@ struct CaptureScreen: View {
                     Label("DEPTHFORGE 3D", systemImage: "cube.transparent").font(.headline).tracking(1.4).foregroundStyle(.mint)
                     Text("Wat wil je\nscannen?").font(.system(size: 42, weight: .bold, design: .rounded))
                     targetCard(.object, icon: "lamp.desk.fill", detail: "Teken een grondcirkel rond je voorwerp. Verfijn het oppervlak vanuit meerdere hoeken.")
-                    targetCard(.room, icon: "house.fill", detail: "Leg de kamer vast en kies een wand, vloer of hoek voor extra detail.")
+                    targetCard(.room, icon: "house.fill", detail: "Scan de hele kamer of schilder zelf welk gebied je wilt vastleggen.")
+                    if scanner.captureTarget == .room {
+                        Picker("Scangebied", selection: $scanner.selectedAreaOnly) {
+                            Text("Hele kamer").tag(false)
+                            Text("Gebied schilderen").tag(true)
+                        }.pickerStyle(.segmented)
+                    }
                     Button(action: scanner.start) {
                         HStack { Text("Start \(scanner.captureTarget == .object ? "voorwerpscan" : "ruimtescan")"); Spacer(); Image(systemName: "arrow.right") }
                             .font(.headline).foregroundStyle(.black).padding()

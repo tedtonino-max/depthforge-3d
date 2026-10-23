@@ -24,10 +24,32 @@ final class SurfelFusion {
         guard camera.width > 2, camera.height > 2, camera.fx > 0, camera.fy > 0,
               input.depths.count == count, input.confidence.count == count,
               input.colors.count == count, input.timestamp > lastTimestamp,
-              !input.isObject || input.objectVolume != nil else {
+              (!input.isObject || input.objectVolume != nil),
+              (!input.selectionOnly || input.detailZone != nil) else {
             return SurfaceUpdate(quality: SurfaceQuality(), visibleSurfels: [], elapsed: 0)
         }
         lastTimestamp = input.timestamp; frameNumber += 1
+        // Reserve capacity for new evidence rather than letting unconfirmed
+        // samples occupy the entire scan. Established geometry is retained.
+        if surfels.count > capacity * 9 / 10 {
+            let tentative = surfels.values.filter { !$0.isStable }.sorted { $0.lastFrame < $1.lastFrame }
+            for s in tentative.prefix(max(1, capacity / 5)) { surfels.removeValue(forKey: s.id) }
+        }
+        func resolution(_ p: Vec3) -> Float {
+            input.detailZone?.contains(p) == true ? 0.004 : (input.isObject ? 0.008 : 0.020)
+        }
+        // A world-space index catches reprojection misses and prevents repeated
+        // passes from allocating another nearly identical layer of surfels.
+        var spatial: [SurfaceBin: Int] = [:]
+        var redundant: [Int] = []
+        for s in surfels.values {
+            let key = SurfaceBin(s.position, normal: s.normal, size: resolution(s.position))
+            if let id = spatial[key], let old = surfels[id], dot(old.normal, s.normal) > 0.9 {
+                if s.observations > old.observations { redundant.append(id); spatial[key] = s.id }
+                else { redundant.append(s.id) }
+            } else { spatial[key] = s.id }
+        }
+        for id in redundant { surfels.removeValue(forKey: id) }
         var projected = [Int](repeating: -1, count: count)
         var zBuffer = [Float](repeating: .infinity, count: count)
         var removals: [Int] = []
@@ -71,6 +93,7 @@ final class SurfelFusion {
                 let world = input.pose.world(local)
                 if input.isObject, input.objectVolume?.contains(world) != true { continue }
                 let inFocus = input.detailZone?.contains(world) == true
+                if input.selectionOnly && !inFocus { continue }
                 let stride = inFocus || input.isObject ? max(1, input.detailStride) : max(2, input.baseStride)
                 if x % stride != phase % stride || y % stride != phase % stride { continue }
                 let guidesSelection = input.detailZone == nil || inFocus
@@ -89,6 +112,7 @@ final class SurfelFusion {
                 let distanceGate = min(0.035, 0.010 + d * 0.006)
                 var match: Int?
                 var best: Float = .infinity
+                let bin = SurfaceBin(world, normal: normal, size: resolution(world))
                 for oy in -1...1 {
                     for ox in -1...1 {
                         let j = (y + oy) * camera.width + x + ox
@@ -104,6 +128,11 @@ final class SurfelFusion {
                         if score < best { best = score; match = id }
                     }
                 }
+                if match == nil, let id = spatial[bin], let candidate = surfels[id],
+                   dot(candidate.normal, normal) > 0.75,
+                   length(candidate.position - world) < max(distanceGate, resolution(world) * 1.8) {
+                    match = id
+                }
                 let id: Int
                 if let match, var s = surfels[match] {
                     id = match
@@ -114,7 +143,8 @@ final class SurfelFusion {
                         let effective = min(32, s.weight)
                         let alpha = w / (effective + w)
                         let refined = s.position + (world - s.position) * alpha
-                        if !input.isObject || input.objectVolume?.contains(refined) == true {
+                        if (!input.isObject || input.objectVolume?.contains(refined) == true) &&
+                           (!input.selectionOnly || input.detailZone?.contains(refined) == true) {
                             s.position = refined
                         }
                         s.normal = unit(s.normal * (1 - alpha) + normal * alpha)
@@ -132,6 +162,7 @@ final class SurfelFusion {
                     id = nextID; nextID += 1
                     surfels[id] = Surfel(id: id, position: world, normal: normal,
                         color: input.colors[i], radius: radius, firstView: view, lastFrame: frameNumber)
+                    spatial[bin] = id
                     // New elements participate immediately in association, but
                     // cannot gain multiple observations from this same frame.
                     projected[i] = id; zBuffer[i] = d
@@ -160,8 +191,9 @@ final class SurfelFusion {
         }.sorted()
         let step = max(1, Int(ceil(Double(ids.count) / Double(max(1, renderLimit)))))
         let visible = Swift.stride(from: 0, to: ids.count, by: step).compactMap { surfels[ids[$0]] }
+        let triangles = SurfaceMesher.triangles(visible, camera: camera, pose: input.pose)
         return SurfaceUpdate(quality: quality, visibleSurfels: visible,
-                             elapsed: Date.timeIntervalSinceReferenceDate - start)
+                             elapsed: Date.timeIntervalSinceReferenceDate - start, camera: camera, triangles: triangles)
     }
 
     private func measuredNormal(_ input: DepthInput, x: Int, y: Int) -> Vec3? {
@@ -184,13 +216,24 @@ final class SurfelFusion {
         return unit(input.pose.rotate(unit(n)))
     }
 
-    func plyData(volume: ObjectScanVolume?) -> Data {
-        let selected = surfels.values.filter { $0.isStable && (volume == nil || volume!.contains($0.position)) }.sorted { $0.id < $1.id }
+    func plyData(volume: ObjectScanVolume?, selection: DetailZone? = nil) -> Data {
+        let selected = surfels.values.filter { $0.isStable && (volume == nil || volume!.contains($0.position)) && (selection == nil || selection!.contains($0.position)) }.sorted { $0.id < $1.id }
         var text = "ply\nformat ascii 1.0\ncomment DepthForge consensus surfels; radius is support, not accuracy\nelement vertex \(selected.count)\nproperty float x\nproperty float y\nproperty float z\nproperty float nx\nproperty float ny\nproperty float nz\nproperty uchar red\nproperty uchar green\nproperty uchar blue\nproperty ushort observations\nproperty float radius\nend_header\n"
         for s in selected {
             let c = s.color
             text += "\(s.position.x) \(s.position.y) \(s.position.z) \(s.normal.x) \(s.normal.y) \(s.normal.z) \(Int(min(255, max(0, c.x)))) \(Int(min(255, max(0, c.y)))) \(Int(min(255, max(0, c.z)))) \(s.observations) \(s.radius)\n"
         }
         return Data(text.utf8)
+    }
+}
+
+private struct SurfaceBin: Hashable {
+    let x: Int; let y: Int; let z: Int; let side: Int; let scale: Int
+    init(_ p: Vec3, normal: Vec3, size: Float) {
+        scale = Int((size * 10000).rounded())
+        x = Int(floor(p.x / size)); y = Int(floor(p.y / size)); z = Int(floor(p.z / size))
+        let a = Vec3(abs(normal.x), abs(normal.y), abs(normal.z))
+        let axis = a.x > a.y && a.x > a.z ? 0 : (a.y > a.z ? 1 : 2)
+        side = axis * 2 + (normal[axis] < 0 ? 1 : 0)
     }
 }
