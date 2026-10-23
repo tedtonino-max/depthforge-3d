@@ -105,11 +105,21 @@ struct CaptureScreen: View {
     }
 
     private var meshNotice: some View {
-        Label("LIVE MESH · turquoise driehoeken zijn gemeten LiDAR-oppervlak", systemImage: "triangle.inset.filled")
+        Label(meshStatus, systemImage: "triangle.inset.filled")
             .font(.caption2.weight(.semibold))
             .padding(.horizontal, 12).padding(.vertical, 7)
             .background(.black.opacity(0.62), in: Capsule())
             .padding(.top, 8)
+    }
+
+    private var meshStatus: String {
+        guard scanner.captureTarget == .object else {
+            return "LIVE MESH · turquoise driehoeken tonen de LiDAR-reconstructie"
+        }
+        guard scanner.liveMeshPasses > 0 else {
+            return "LIVE DETAILMESH · eerste gemeten laag wordt opgebouwd"
+        }
+        return "LIVE DETAILMESH · pass \(scanner.liveMeshPasses) · \(scanner.liveMeshTriangles) driehoeken"
     }
 
     @ViewBuilder private var bottomPanel: some View {

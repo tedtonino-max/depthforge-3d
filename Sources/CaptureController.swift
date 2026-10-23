@@ -13,6 +13,8 @@ final class CaptureController: NSObject, ObservableObject {
     @Published private(set) var scanRoot: URL?
     @Published private(set) var metalEnabled = false
     @Published private(set) var roomPlanAvailable = false
+    @Published private(set) var liveMeshPasses = 0
+    @Published private(set) var liveMeshTriangles = 0
     @Published var captureProfile: CaptureProfile = .maximumGeometry
     @Published var captureTarget: CaptureTarget = .object
     @Published var showShareSheet = false
@@ -24,17 +26,20 @@ final class CaptureController: NSObject, ObservableObject {
     private var roomSession: RoomCaptureSession?
     private var lastSavedTimestamp: TimeInterval = 0
     private var lastHeatmapTimestamp: TimeInterval = 0
+    private var lastPreviewMeshTimestamp: TimeInterval = 0
     private var lastConfigurationCheckTimestamp: TimeInterval = 0
     private var sequence = 0
     private var completedRoom: CapturedRoom?
     private let accelerator = MetalFusionAccelerator()
     private let liveMeshOverlay = LiveMeshOverlay()
+    private let progressiveMesh = ProgressiveDepthMeshOverlay()
 
     override init() {
         super.init()
         sceneView.session.delegate = self
         sceneView.delegate = liveMeshOverlay
         sceneView.automaticallyUpdatesLighting = true
+        progressiveMesh.attach(to: sceneView.scene.rootNode)
         metalEnabled = accelerator.isAvailable
     }
 
@@ -45,7 +50,10 @@ final class CaptureController: NSObject, ObservableObject {
         }
         do {
             scanRoot = try store.beginNewScan()
-            fusion.reset(); projectedCells = []; quality = QualitySummary(); sequence = 0; completedRoom = nil; roomPlanAvailable = false; shareURL = nil; lastSavedTimestamp = 0; lastHeatmapTimestamp = 0; lastConfigurationCheckTimestamp = 0
+            fusion.reset(); progressiveMesh.reset(); projectedCells = []; quality = QualitySummary(); sequence = 0; completedRoom = nil; roomPlanAvailable = false; shareURL = nil; liveMeshPasses = 0; liveMeshTriangles = 0; lastSavedTimestamp = 0; lastHeatmapTimestamp = 0; lastPreviewMeshTimestamp = 0; lastConfigurationCheckTimestamp = 0
+            // For object mode the visible mesh must be the measured progressive
+            // depth mesh, not ARKit's coarse room reconstruction.
+            liveMeshOverlay.displaysNativeMesh = captureTarget == .room
             let configuration = ARWorldTrackingConfiguration()
             configuration.frameSemantics = [.sceneDepth, .smoothedSceneDepth]
             if ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) { configuration.sceneReconstruction = .meshWithClassification }
@@ -87,6 +95,9 @@ final class CaptureController: NSObject, ObservableObject {
         sceneView.session.pause()
         projectedCells = []
         quality = QualitySummary()
+        progressiveMesh.reset()
+        liveMeshPasses = 0
+        liveMeshTriangles = 0
         state = .idle
         statusLine = "Kies eerst wat je wilt scannen."
     }
@@ -168,6 +179,20 @@ extension CaptureController: ARSessionDelegate {
             guard timestamp - self.lastSavedTimestamp >= self.captureProfile.frameInterval else { return }
             self.lastSavedTimestamp = timestamp; self.sequence += 1
             self.quality = self.fusion.integrate(frame: frame, sampleStride: self.captureProfile.sampleStride, captureTarget: self.captureTarget)
+            if self.captureTarget == .object,
+               timestamp - self.lastPreviewMeshTimestamp >= 0.8 {
+                self.lastPreviewMeshTimestamp = timestamp
+                let nextPass = self.liveMeshPasses + 1
+                if let patch = self.progressiveMesh.appendMeasuredPatch(
+                    from: frame,
+                    captureTarget: self.captureTarget,
+                    profile: self.captureProfile,
+                    pass: nextPass
+                ) {
+                    self.liveMeshPasses = patch.pass
+                    self.liveMeshTriangles = patch.triangles
+                }
+            }
             self.store.append(frame: frame, sequence: self.sequence) { result in
                 Task { @MainActor [weak self] in
                     if case .failure(let error) = result {
