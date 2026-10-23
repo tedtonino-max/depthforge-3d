@@ -137,7 +137,7 @@ extension CaptureController: RoomCaptureSessionDelegate {
             guard let self else { return }
             if let error { self.statusLine = "RoomPlan niet beschikbaar: \(error.localizedDescription)"; self.finalize(room: nil); return }
             do {
-                let room = try RoomBuilder(options: [.beautifyObjects]).capturedRoom(from: data)
+                let room = try await RoomBuilder(options: [.beautifyObjects]).capturedRoom(from: data)
                 self.finalize(room: room)
             } catch {
                 self.statusLine = "RoomPlan-resultaat kon niet worden opgebouwd; ruwe scan blijft behouden."
