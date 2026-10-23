@@ -9,92 +9,157 @@ struct CaptureScreen: View {
         ZStack {
             CameraPreview(view: scanner.sceneView).ignoresSafeArea()
             QualityOverlay(cells: scanner.projectedCells).ignoresSafeArea().allowsHitTesting(false)
-            VStack(spacing: 12) {
-                header
+            VStack(spacing: 0) {
+                header.padding(.horizontal, 20).padding(.top, 16)
                 Spacer()
-                qualityCard
-                controls
+                if scanner.state == .recording || scanner.state == .paused { liveMap.padding(.horizontal, 20) }
+                bottomPanel
             }
-            .padding(20)
         }
+        .background(Fieldwork.paper)
         .sheet(isPresented: $scanner.showShareSheet) {
             if let url = scanner.shareURL { ShareSheet(items: [url]) }
         }
     }
 
     private var header: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("DEPTHFORGE 3D").font(.headline.weight(.bold))
-                Text(scanner.metalEnabled ? "LiDAR · RGB · RoomPlan · Metal gereed" : "LiDAR · RGB · RoomPlan · CPU-fusie")
-                    .font(.caption).foregroundStyle(.secondary)
+        HStack(alignment: .top, spacing: 14) {
+            VStack(alignment: .leading, spacing: 5) {
+                FieldworkEyebrow(text: "DepthForge · field scan")
+                Text("3D capture").font(.title2.weight(.bold)).tracking(-0.5)
+                Text(scanner.metalEnabled ? "LiDAR · RGB · RoomPlan · Metal" : "LiDAR · RGB · RoomPlan")
+                    .font(.caption).foregroundStyle(Fieldwork.secondary)
             }
             Spacer()
             StateBadge(state: scanner.state)
         }
-        .padding(14).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .foregroundStyle(Fieldwork.ink)
+        .padding(16)
+        .background(Fieldwork.paper.opacity(0.96), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(FieldworkCorners().stroke(Fieldwork.orange, lineWidth: 1.5))
     }
 
-    private var qualityCard: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack {
-                Label("Live 3D-kwaliteitskaart", systemImage: "square.3.layers.3d")
-                    .font(.headline)
-                Spacer()
-                Text("consistentie \(Int(scanner.quality.meanConsistency * 100))%")
-                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-            }
-            Text(scanner.quality.status).font(.subheadline.monospacedDigit())
-            HStack(spacing: 12) {
-                Metric(value: scanner.quality.coveredCells, label: "sterk", color: .green)
-                Metric(value: scanner.quality.weakCells, label: "zwak", color: .orange)
-                Metric(value: scanner.quality.usableMeasurements, label: "metingen", color: .cyan)
-            }
-            Divider()
-            Label(scanner.statusLine, systemImage: scanner.quality.advice == .complete ? "checkmark.circle.fill" : "arrow.triangle.2.circlepath")
-                .font(.subheadline).foregroundStyle(scanner.quality.advice == .complete ? .green : .white)
-        }
-        .padding(15).background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
-    }
-
-    private var controls: some View {
-        HStack(spacing: 12) {
-            switch scanner.state {
-            case .idle, .finished, .failed:
-                Button(action: scanner.start) { Label("Nieuwe scan", systemImage: "record.circle") }.buttonStyle(PrimaryButton())
-            case .recording, .paused:
-                Button(action: scanner.pauseOrResume) { Label(scanner.state == .recording ? "Pauze" : "Hervat", systemImage: scanner.state == .recording ? "pause.fill" : "play.fill") }.buttonStyle(PrimaryButton())
-                Button(action: scanner.finish) { Label("Afronden", systemImage: "checkmark") }.buttonStyle(SecondaryButton())
-            case .finishing:
-                ProgressView().tint(.white).padding()
+    private var liveMap: some View {
+        HStack(spacing: 14) {
+            VStack(alignment: .leading, spacing: 5) {
+                FieldworkEyebrow(text: "live geometry")
+                Text("Quality map").font(.headline)
+                Text(scanner.quality.status).font(.caption.monospacedDigit()).foregroundStyle(Fieldwork.secondary)
             }
             Spacer()
-            if scanner.state == .finished {
-                Button(action: scanner.exportAndShare) { Label("Exporteer PLY", systemImage: "square.and.arrow.up") }.buttonStyle(SecondaryButton())
+            QualityRing(quality: scanner.quality)
+        }
+        .foregroundStyle(Fieldwork.ink)
+        .padding(14)
+        .background(Fieldwork.paper.opacity(0.96), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(FieldworkCorners().stroke(Fieldwork.orange, lineWidth: 1.25))
+    }
+
+    private var bottomPanel: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            FieldworkRule()
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    FieldworkEyebrow(text: scanner.state == .recording ? "next pass" : "scan status")
+                    Text(scanner.statusLine).font(.subheadline.weight(.medium))
+                }
+                Spacer(minLength: 12)
+                if scanner.state == .recording || scanner.state == .paused {
+                    Text("\(Int(scanner.quality.meanConsistency * 100))%")
+                        .font(.title3.monospacedDigit().weight(.bold))
+                }
             }
+            if scanner.state == .recording || scanner.state == .paused { metrics }
+            controls
+        }
+        .foregroundStyle(Fieldwork.ink)
+        .padding(.horizontal, 20).padding(.top, 16).padding(.bottom, 20)
+        .background(Fieldwork.paper)
+    }
+
+    private var metrics: some View {
+        HStack(spacing: 0) {
+            Metric(value: scanner.quality.coveredCells, label: "sterk", color: .green)
+            divider
+            Metric(value: scanner.quality.weakCells, label: "opnieuw", color: Fieldwork.orange)
+            divider
+            Metric(value: scanner.quality.usableMeasurements, label: "metingen", color: Fieldwork.ink)
+        }
+    }
+
+    private var divider: some View { FieldworkRule().frame(width: 1, height: 38).padding(.horizontal, 16) }
+
+    @ViewBuilder private var controls: some View {
+        switch scanner.state {
+        case .idle, .finished, .failed:
+            Button(action: scanner.start) { Label("Nieuwe scan", systemImage: "viewfinder") }
+                .buttonStyle(FieldworkButtonStyle())
+            if scanner.state == .finished {
+                Button(action: scanner.exportAndShare) { Label("Exporteer PLY", systemImage: "square.and.arrow.up") }
+                    .buttonStyle(FieldworkButtonStyle(filled: false))
+            }
+        case .recording:
+            HStack(spacing: 10) {
+                Button(action: scanner.pauseOrResume) { Label("Pauze", systemImage: "pause.fill") }
+                    .buttonStyle(FieldworkButtonStyle(filled: false))
+                Button(action: scanner.finish) { Label("Scan opslaan", systemImage: "checkmark") }
+                    .buttonStyle(FieldworkButtonStyle())
+            }
+        case .paused:
+            HStack(spacing: 10) {
+                Button(action: scanner.pauseOrResume) { Label("Hervat", systemImage: "play.fill") }
+                    .buttonStyle(FieldworkButtonStyle())
+                Button(action: scanner.finish) { Label("Nu opslaan", systemImage: "checkmark") }
+                    .buttonStyle(FieldworkButtonStyle(filled: false))
+            }
+        case .finishing:
+            HStack(spacing: 12) {
+                ProgressView().tint(Fieldwork.orange)
+                Text("Scan wordt lokaal opgeslagen…").font(.subheadline.weight(.medium))
+            }.frame(maxWidth: .infinity, minHeight: 52)
         }
     }
 }
 
 private struct Metric: View {
     let value: Int; let label: String; let color: Color
-    var body: some View { VStack(alignment: .leading, spacing: 1) { Text("\(value)").font(.title3.monospacedDigit().weight(.semibold)).foregroundStyle(color); Text(label).font(.caption2).foregroundStyle(.secondary) } }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("\(value)").font(.title3.monospacedDigit().weight(.bold)).foregroundStyle(color)
+            Text(label.uppercased()).font(.system(.caption2, design: .monospaced)).foregroundStyle(Fieldwork.secondary)
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct QualityRing: View {
+    let quality: QualitySummary
+    var body: some View {
+        let percent = min(1, max(0, quality.meanConsistency))
+        ZStack {
+            Circle().stroke(Fieldwork.rule, lineWidth: 5)
+            Circle().trim(from: 0, to: percent)
+                .stroke(quality.advice == .complete ? .green : Fieldwork.orange, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+            Text("\(Int(percent * 100))% ").font(.caption2.monospacedDigit().weight(.bold))
+        }.frame(width: 48, height: 48)
+    }
 }
 
 private struct StateBadge: View {
     let state: ScanState
     var body: some View {
-        let text: String = switch state { case .idle: "KLAAR"; case .recording: "OPNAME"; case .paused: "PAUZE"; case .finishing: "OPSLAAN"; case .finished: "OPGESLAGEN"; case .failed: "FOUT" }
-        Text(text).font(.caption.weight(.bold)).padding(.horizontal, 10).padding(.vertical, 6)
-            .background(state == .recording ? Color.red.opacity(0.8) : Color.white.opacity(0.15), in: Capsule())
+        let value: (String, Color) = switch state {
+        case .idle: ("KLAAR", Fieldwork.secondary)
+        case .recording: ("OPNAME", Fieldwork.orange)
+        case .paused: ("PAUZE", Fieldwork.orange)
+        case .finishing: ("OPSLAAN", Fieldwork.secondary)
+        case .finished: ("OPGESLAGEN", .green)
+        case .failed: ("FOUT", .red)
+        }
+        Text(value.0).font(.system(.caption, design: .monospaced).weight(.bold)).tracking(1)
+            .foregroundStyle(value.1).padding(.horizontal, 9).padding(.vertical, 7)
+            .overlay(Capsule().stroke(value.1.opacity(0.7), lineWidth: 1))
     }
-}
-
-private struct PrimaryButton: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View { configuration.label.font(.headline).padding(.horizontal, 16).padding(.vertical, 12).background(Color.accentColor.opacity(configuration.isPressed ? 0.65 : 0.95), in: Capsule()).scaleEffect(configuration.isPressed ? 0.98 : 1) }
-}
-private struct SecondaryButton: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View { configuration.label.font(.headline).padding(.horizontal, 16).padding(.vertical, 12).background(.thinMaterial, in: Capsule()).scaleEffect(configuration.isPressed ? 0.98 : 1) }
 }
 
 private struct CameraPreview: UIViewRepresentable {
@@ -108,9 +173,9 @@ private struct QualityOverlay: View {
     var body: some View {
         Canvas { context, _ in
             for cell in cells {
-                let color: Color = cell.quality >= 0.72 ? .green : (cell.quality >= 0.42 ? .orange : .red)
+                let color: Color = cell.quality >= 0.72 ? .green : (cell.quality >= 0.42 ? Fieldwork.orange : .red)
                 let radius: CGFloat = cell.quality >= 0.72 ? 4 : 6
-                context.fill(Path(ellipseIn: CGRect(x: cell.point.x - radius, y: cell.point.y - radius, width: radius * 2, height: radius * 2)), with: .color(color.opacity(0.58)))
+                context.fill(Path(ellipseIn: CGRect(x: cell.point.x - radius, y: cell.point.y - radius, width: radius * 2, height: radius * 2)), with: .color(color.opacity(0.66)))
             }
         }
     }
