@@ -29,17 +29,13 @@ final class ProgressiveDepthMeshOverlay {
         captureTarget: CaptureTarget,
         profile: CaptureProfile,
         pass: Int,
-        objectRegion: ObjectScanRegion,
-        orientation: UIInterfaceOrientation,
-        viewport: CGSize
+        objectVolume: ObjectScanVolume?
     ) -> MeasuredMeshPatch? {
         guard captureTarget == .object,
               let mesh = makeGeometry(
                 from: frame,
                 sampleStep: sampleStep(for: pass, profile: profile),
-                objectRegion: objectRegion,
-                orientation: orientation,
-                viewport: viewport
+                objectVolume: objectVolume
               ) else {
             return nil
         }
@@ -76,9 +72,7 @@ final class ProgressiveDepthMeshOverlay {
     private func makeGeometry(
         from frame: ARFrame,
         sampleStep: Int,
-        objectRegion: ObjectScanRegion,
-        orientation: UIInterfaceOrientation,
-        viewport: CGSize
+        objectVolume: ObjectScanVolume?
     ) -> (geometry: SCNGeometry, triangles: Int)? {
         guard let depthData = frame.sceneDepth else { return nil }
         let depth = depthData.depthMap
@@ -97,17 +91,7 @@ final class ProgressiveDepthMeshOverlay {
         let confidenceBase = confidence.flatMap(CVPixelBufferGetBaseAddress)
         let confidenceRowBytes = confidence.map(CVPixelBufferGetBytesPerRow) ?? 0
         let isFloat16 = CVPixelBufferGetPixelFormatType(depth) == kCVPixelFormatType_DepthFloat16
-        let displayTransform = viewport.width > 0 && viewport.height > 0
-            ? frame.displayTransform(for: orientation, viewportSize: viewport)
-            : .identity
-        guard let targetDepth = targetDepth(
-            base: depthBase,
-            rowBytes: depthRowBytes,
-            width: width,
-            height: height,
-            isFloat16: isFloat16,
-            center: objectRegion.depthCenter(displayTransform: displayTransform)
-        ) else { return nil }
+        guard let objectVolume else { return nil }
 
         let imageSize = frame.camera.imageResolution
         var intrinsics = frame.camera.intrinsics
@@ -134,15 +118,7 @@ final class ProgressiveDepthMeshOverlay {
             for (column, x) in xs.enumerated() {
                 if let confidenceLine, confidenceLine[x] < 1 { continue }
                 let distance = depthValue(base: depthBase, rowBytes: depthRowBytes, x: x, y: y, isFloat16: isFloat16)
-                guard distance.isFinite, distance > 0.08, distance < 8,
-                      objectRegion.contains(
-                        depthX: x,
-                        depthY: y,
-                        depthWidth: width,
-                        depthHeight: height,
-                        displayTransform: displayTransform
-                      ),
-                      abs(distance - targetDepth) <= 0.35 else { continue }
+                guard distance.isFinite, distance > 0.08, distance < 8 else { continue }
                 let local = SIMD4<Float>(
                     (Float(x) - intrinsics.columns.2.x) * distance / intrinsics.columns.0.x,
                     (Float(y) - intrinsics.columns.2.y) * distance / intrinsics.columns.1.y,
@@ -150,6 +126,7 @@ final class ProgressiveDepthMeshOverlay {
                     1
                 )
                 let world = simd_mul(frame.camera.transform, local)
+                guard objectVolume.contains(SIMD3<Float>(world.x, world.y, world.z)) else { continue }
                 let gridIndex = row * xs.count + column
                 grid[gridIndex] = UInt32(positions.count)
                 localDepths[gridIndex] = distance
@@ -202,49 +179,23 @@ final class ProgressiveDepthMeshOverlay {
             dataStride: MemoryLayout<SIMD4<UInt8>>.stride
         )
         let triangleCount = indices.count / 3
-        let surface = SCNGeometryElement(data: indexData, primitiveType: .triangles, primitiveCount: triangleCount, bytesPerIndex: MemoryLayout<UInt32>.size)
         let wire = SCNGeometryElement(data: indexData, primitiveType: .triangles, primitiveCount: triangleCount, bytesPerIndex: MemoryLayout<UInt32>.size)
-        let geometry = SCNGeometry(sources: [source, colorSource], elements: [surface, wire])
-        geometry.materials = [surfaceMaterial(), wireMaterial()]
+        let geometry = SCNGeometry(sources: [source, colorSource], elements: [wire])
+        geometry.materials = [wireMaterial()]
         return (geometry, triangleCount)
-    }
-
-    private func surfaceMaterial() -> SCNMaterial {
-        let material = SCNMaterial()
-        material.lightingModel = .constant
-        // Per-vertex RGB sampled from ARKit's camera frame makes the measured
-        // surface readable instead of a featureless turquoise veil.
-        material.diffuse.contents = UIColor.white.withAlphaComponent(0.72)
-        material.emission.contents = UIColor.black
-        material.isDoubleSided = true
-        material.writesToDepthBuffer = false
-        return material
     }
 
     private func wireMaterial() -> SCNMaterial {
         let material = SCNMaterial()
         material.lightingModel = .constant
-        material.diffuse.contents = UIColor.systemTeal.withAlphaComponent(0.58)
-        material.emission.contents = UIColor.systemTeal.withAlphaComponent(0.26)
+        // Outline-only: the real camera feed remains visible while the mesh
+        // grows. Per-vertex RGB still modulates the subtle scan lines.
+        material.diffuse.contents = UIColor.systemMint.withAlphaComponent(0.42)
+        material.emission.contents = UIColor.systemTeal.withAlphaComponent(0.18)
         material.fillMode = .lines
         material.isDoubleSided = true
         material.writesToDepthBuffer = false
         return material
-    }
-
-    private func targetDepth(base: UnsafeMutableRawPointer, rowBytes: Int, width: Int, height: Int, isFloat16: Bool, center: CGPoint) -> Float? {
-        let centerX = min(width - 1, max(0, Int(center.x * CGFloat(width))))
-        let centerY = min(height - 1, max(0, Int(center.y * CGFloat(height))))
-        var samples: [Float] = []
-        for y in max(0, centerY - 5)...min(height - 1, centerY + 5) {
-            for x in max(0, centerX - 5)...min(width - 1, centerX + 5) {
-                let value = depthValue(base: base, rowBytes: rowBytes, x: x, y: y, isFloat16: isFloat16)
-                if value.isFinite, value > 0.08, value < 8 { samples.append(value) }
-            }
-        }
-        guard !samples.isEmpty else { return nil }
-        samples.sort()
-        return samples[samples.count / 2]
     }
 
     private func depthValue(base: UnsafeMutableRawPointer, rowBytes: Int, x: Int, y: Int, isFloat16: Bool) -> Float {

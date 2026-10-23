@@ -6,11 +6,11 @@ final class DepthProjectStore {
     private let encoder = JSONEncoder()
     private(set) var root: URL?
     private(set) var frameCount = 0
-    private var objectScanRegion: ObjectScanRegion?
+    private var objectScanVolume: ObjectScanVolume?
     private var indexHandle: FileHandle?
     private let queue = DispatchQueue(label: "com.depthforge.writer", qos: .utility)
 
-    func beginNewScan(objectRegion: ObjectScanRegion?) throws -> URL {
+    func beginNewScan(objectVolume: ObjectScanVolume?) throws -> URL {
         let id = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
         let applicationSupport = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
         let destination = applicationSupport.appendingPathComponent("DepthForgeScans/\(id)", isDirectory: true)
@@ -21,7 +21,7 @@ final class DepthProjectStore {
         guard FileManager.default.createFile(atPath: indexURL.path, contents: nil) else {
             throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: indexURL.path])
         }
-        root = destination; frameCount = 0; objectScanRegion = objectRegion
+        root = destination; frameCount = 0; objectScanVolume = objectVolume
         indexHandle = try FileHandle(forWritingTo: indexURL)
         try checkpoint(roomPlanFile: nil)
         return destination
@@ -78,7 +78,7 @@ final class DepthProjectStore {
     func checkpoint(roomPlanFile: String?) throws {
         try queue.sync {
             guard let root else { return }
-            let manifest = ScanManifest(createdAt: Date(), device: UIDevice.current.model, frames: frameCount, roomPlanFile: roomPlanFile, objectScanRegion: objectScanRegion)
+            let manifest = ScanManifest(createdAt: Date(), device: UIDevice.current.model, frames: frameCount, roomPlanFile: roomPlanFile, objectScanVolume: objectScanVolume)
             try encoder.encode(manifest).write(to: root.appendingPathComponent("manifest.json"), options: .atomic)
         }
     }

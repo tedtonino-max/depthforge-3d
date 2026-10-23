@@ -2,6 +2,7 @@ import ARKit
 import Combine
 import RoomPlan
 import SceneKit
+import simd
 import SwiftUI
 
 @MainActor
@@ -17,7 +18,7 @@ final class CaptureController: NSObject, ObservableObject {
     @Published private(set) var liveMeshTriangles = 0
     @Published var captureProfile: CaptureProfile = .maximumGeometry
     @Published var captureTarget: CaptureTarget = .object
-    @Published var objectScanRegion: ObjectScanRegion = .initial
+    @Published private(set) var objectScanVolume: ObjectScanVolume?
     @Published var showShareSheet = false
     @Published private(set) var shareURL: URL?
 
@@ -34,6 +35,7 @@ final class CaptureController: NSObject, ObservableObject {
     private let accelerator = MetalFusionAccelerator()
     private let liveMeshOverlay = LiveMeshOverlay()
     private let progressiveMesh = ProgressiveDepthMeshOverlay()
+    private let objectVolumeOverlay = ObjectScanVolumeOverlay()
 
     override init() {
         super.init()
@@ -41,6 +43,7 @@ final class CaptureController: NSObject, ObservableObject {
         sceneView.delegate = liveMeshOverlay
         sceneView.automaticallyUpdatesLighting = true
         progressiveMesh.attach(to: sceneView.scene.rootNode)
+        objectVolumeOverlay.attach(to: sceneView.scene.rootNode)
         metalEnabled = accelerator.isAvailable
     }
 
@@ -57,6 +60,8 @@ final class CaptureController: NSObject, ObservableObject {
         sceneView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
         if captureTarget == .object {
             progressiveMesh.reset()
+            objectVolumeOverlay.reset()
+            objectScanVolume = nil
             liveMeshPasses = 0
             liveMeshTriangles = 0
             state = .framing
@@ -66,22 +71,45 @@ final class CaptureController: NSObject, ObservableObject {
         beginRecording()
     }
 
-    func confirmObjectRegion() {
-        guard state == .framing else { return }
+    func confirmObjectVolume() {
+        guard state == .framing, objectScanVolume != nil else {
+            statusLine = "Teken eerst een cirkel op de vloer rond het voorwerp."
+            return
+        }
+        objectVolumeOverlay.setRecording(true)
         beginRecording()
     }
 
-    func moveObjectScanRegion(by normalizedOffset: CGSize) {
-        objectScanRegion = objectScanRegion.moved(by: normalizedOffset)
+    func beginObjectVolume(at point: CGPoint) {
+        guard state == .framing, let ground = groundPoint(at: point) else {
+            statusLine = "Richt eerst op een zichtbare vloer en teken de cirkel opnieuw."
+            return
+        }
+        let volume = ObjectScanVolume(center: ground)
+        objectScanVolume = volume
+        objectVolumeOverlay.show(volume, isRecording: false)
+        statusLine = "Scanvolume geplaatst. Sleep verder om de cirkel rond het voorwerp te zetten."
     }
 
-    func scaleObjectScanRegion(by factor: CGFloat) {
-        objectScanRegion = objectScanRegion.scaled(by: factor)
+    func resizeObjectVolume(to point: CGPoint) {
+        guard state == .framing,
+              let current = objectScanVolume,
+              let ground = groundPoint(at: point) else { return }
+        let delta = ground - current.center
+        objectScanVolume = current.resized(to: simd_length(SIMD2(delta.x, delta.z)))
+        if let objectScanVolume { objectVolumeOverlay.show(objectScanVolume, isRecording: false) }
+    }
+
+    func clearObjectVolume() {
+        guard state == .framing else { return }
+        objectScanVolume = nil
+        objectVolumeOverlay.reset()
+        statusLine = "Teken een nieuwe cirkel op de vloer rond het voorwerp."
     }
 
     private func beginRecording() {
         do {
-            scanRoot = try store.beginNewScan(objectRegion: captureTarget == .object ? objectScanRegion : nil)
+            scanRoot = try store.beginNewScan(objectVolume: captureTarget == .object ? objectScanVolume : nil)
             fusion.reset(); progressiveMesh.reset(); projectedCells = []; quality = QualitySummary(); sequence = 0; completedRoom = nil; roomPlanAvailable = false; shareURL = nil; liveMeshPasses = 0; liveMeshTriangles = 0; lastSavedTimestamp = 0; lastHeatmapTimestamp = 0; lastPreviewMeshTimestamp = 0; lastConfigurationCheckTimestamp = 0
             // For object mode the visible mesh must be the measured progressive
             // depth mesh, not ARKit's coarse room reconstruction.
@@ -90,7 +118,7 @@ final class CaptureController: NSObject, ObservableObject {
             ensureGeometryDepthConfiguration()
             state = .recording
             statusLine = captureTarget == .object
-                ? "Scanvak actief. Beweeg rustig om het voorwerp vanuit nieuwe hoeken te meten."
+                ? "Scanvolume actief. Beweeg rustig om het voorwerp vanuit nieuwe hoeken te meten."
                 : "LiDAR wordt gestart; richt op een wand of object met detail."
         } catch { state = .failed("Lokale opslag kon niet worden voorbereid: \(error.localizedDescription)") }
     }
@@ -123,6 +151,8 @@ final class CaptureController: NSObject, ObservableObject {
         projectedCells = []
         quality = QualitySummary()
         progressiveMesh.reset()
+        objectVolumeOverlay.reset()
+        objectScanVolume = nil
         liveMeshPasses = 0
         liveMeshTriangles = 0
         state = .idle
@@ -207,14 +237,7 @@ extension CaptureController: ARSessionDelegate {
             self.lastSavedTimestamp = timestamp; self.sequence += 1
             let orientation = self.sceneView.window?.windowScene?.interfaceOrientation ?? .portrait
             let viewport = self.sceneView.bounds.size
-            self.quality = self.fusion.integrate(
-                frame: frame,
-                sampleStride: self.captureProfile.sampleStride,
-                captureTarget: self.captureTarget,
-                objectRegion: self.objectScanRegion,
-                orientation: orientation,
-                viewport: viewport
-            )
+            self.quality = self.fusion.integrate(frame: frame, sampleStride: self.captureProfile.sampleStride, captureTarget: self.captureTarget, objectVolume: self.objectScanVolume)
             if self.captureTarget == .object,
                timestamp - self.lastPreviewMeshTimestamp >= 0.8 {
                 self.lastPreviewMeshTimestamp = timestamp
@@ -224,9 +247,7 @@ extension CaptureController: ARSessionDelegate {
                     captureTarget: self.captureTarget,
                     profile: self.captureProfile,
                     pass: nextPass,
-                    objectRegion: self.objectScanRegion,
-                    orientation: orientation,
-                    viewport: viewport
+                    objectVolume: self.objectScanVolume
                 ) {
                     self.liveMeshPasses = patch.pass
                     self.liveMeshTriangles = patch.triangles
@@ -255,6 +276,17 @@ extension CaptureController: ARSessionDelegate {
             if case .normal = camera.trackingState { return }
             self.statusLine = "Tracking is onvoldoende; opname wacht op stabiele positie."
         }
+    }
+
+    private func groundPoint(at point: CGPoint) -> SIMD3<Float>? {
+        let targets: [ARRaycastQuery.Target] = [.existingPlaneGeometry, .estimatedPlane]
+        for target in targets {
+            guard let query = sceneView.raycastQuery(from: point, allowing: target, alignment: .horizontal),
+                  let result = sceneView.session.raycast(query).first else { continue }
+            let transform = result.worldTransform
+            return SIMD3(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
+        }
+        return nil
     }
 }
 

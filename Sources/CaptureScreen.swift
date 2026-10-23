@@ -33,12 +33,7 @@ struct CaptureScreen: View {
         ZStack {
             CameraPreview(view: scanner.sceneView).ignoresSafeArea()
             if scanner.state == .framing {
-                ObjectAreaPicker(region: scanner.objectScanRegion) { offset in
-                    scanner.moveObjectScanRegion(by: offset)
-                }
-                .ignoresSafeArea()
-            } else if isScanning, scanner.captureTarget == .object {
-                ObjectTargetGuide(region: scanner.objectScanRegion).ignoresSafeArea().allowsHitTesting(false)
+                FloorVolumePicker().ignoresSafeArea()
             }
             VStack {
                 topBar
@@ -122,9 +117,9 @@ struct CaptureScreen: View {
             return "LIVE MESH · turquoise driehoeken tonen de LiDAR-reconstructie"
         }
         guard scanner.liveMeshPasses > 0 else {
-            return "LIVE DETAILMESH · eerste gemeten laag wordt opgebouwd"
+            return "LIVE DRAADMESH · eerste meetlijnen worden opgebouwd"
         }
-        return "LIVE RGB-MESH · pass \(scanner.liveMeshPasses) · \(scanner.liveMeshTriangles) driehoeken"
+        return "LIVE DRAADMESH · pass \(scanner.liveMeshPasses) · \(scanner.liveMeshTriangles) driehoeken"
     }
 
     @ViewBuilder private var bottomPanel: some View {
@@ -145,14 +140,13 @@ struct CaptureScreen: View {
             }
         case .framing:
             panel {
-                Label("Bepaal je scanvak", systemImage: "viewfinder.circle.fill").font(.headline)
-                Text("Sleep het kader naar het voorwerp. Alleen LiDAR-data in dit vak wordt gefuseerd in de live mesh en PLY. Er wordt nog niets opgeslagen.")
+                Label("Teken het scanvolume", systemImage: "circle.dashed.inset.filled").font(.headline)
+                Text("Teken op de vloer een cirkel rond het voorwerp. De groene cilinder is het enige gebied dat naar de live mesh en PLY gaat. Er wordt nog niets opgeslagen.")
                     .font(.footnote).foregroundStyle(.secondary)
                 HStack {
-                    Button("Kleiner") { scanner.scaleObjectScanRegion(by: 0.84) }.buttonStyle(.bordered)
-                    Button("Groter") { scanner.scaleObjectScanRegion(by: 1.18) }.buttonStyle(.bordered)
+                    Button("Opnieuw plaatsen", action: scanner.clearObjectVolume).buttonStyle(.bordered)
                     Spacer()
-                    Button("Gebruik dit scanvak", action: scanner.confirmObjectRegion)
+                    Button("Start scan", action: scanner.confirmObjectVolume)
                         .buttonStyle(.borderedProminent)
                 }
                 Button("Annuleer", action: scanner.returnToStart)
@@ -208,7 +202,7 @@ struct CaptureScreen: View {
     private var stateTitle: String {
         switch scanner.state {
         case .idle: "Klaar voor LiDAR"
-        case .framing: "Scanvak kiezen"
+        case .framing: "Scanvolume kiezen"
         case .recording: "Opnemen"
         case .paused: "Gepauzeerd"
         case .finishing: "Opslaan"
@@ -403,80 +397,35 @@ private struct LiveQualityMap: View {
     }
 }
 
-private struct ObjectTargetGuide: View {
-    let region: ObjectScanRegion
-    var body: some View {
-        GeometryReader { proxy in
-            let frame = CGRect(x: region.x * proxy.size.width, y: region.y * proxy.size.height, width: region.width * proxy.size.width, height: region.height * proxy.size.height)
-            RoundedRectangle(cornerRadius: 22)
-                .stroke(.mint.opacity(0.92), style: StrokeStyle(lineWidth: 2, dash: [10, 8]))
-                .frame(width: frame.width, height: frame.height)
-                .position(x: frame.midX, y: frame.midY)
-                .overlay {
-                    Text("SCANVAK ACTIEF · beweeg voor extra hoeken")
-                        .font(.caption2.weight(.bold)).tracking(0.5)
-                        .padding(.horizontal, 10).padding(.vertical, 6)
-                        .background(.black.opacity(0.55), in: Capsule())
-                }
-        }
-    }
-}
-
-/// The visible selection is kept in normalized preview coordinates. The
-/// controller converts it through ARKit's display transform before it accepts a
-/// depth sample, avoiding the old wide, room-like object export.
-private struct ObjectAreaPicker: View {
-    let region: ObjectScanRegion
-    let move: (CGSize) -> Void
-    @State private var dragStart: ObjectScanRegion?
+/// Draw on the visible floor: the first touch places a world-space circle and
+/// dragging adjusts its radius. The real circle is rendered by SceneKit, so it
+/// remains fixed to the floor while the iPad moves.
+private struct FloorVolumePicker: View {
+    @EnvironmentObject private var scanner: CaptureController
+    @State private var isDrawing = false
 
     var body: some View {
-        GeometryReader { proxy in
-            let frame = CGRect(
-                x: region.x * proxy.size.width,
-                y: region.y * proxy.size.height,
-                width: region.width * proxy.size.width,
-                height: region.height * proxy.size.height
-            )
-            ZStack {
-                ScanAreaShade(frame: frame).fill(.black.opacity(0.48), style: FillStyle(eoFill: true)).allowsHitTesting(false)
-                RoundedRectangle(cornerRadius: 22)
-                    .stroke(.mint, style: StrokeStyle(lineWidth: 3, dash: [10, 7]))
-                    .frame(width: frame.width, height: frame.height)
-                    .position(x: frame.midX, y: frame.midY)
-                    .overlay {
-                        VStack(spacing: 6) {
-                            Text("ALLEEN DIT SCANVAK")
-                                .font(.caption2.weight(.bold)).tracking(1)
-                            Text("Sleep om te verplaatsen")
-                                .font(.caption2).foregroundStyle(.white.opacity(0.8))
+        Color.clear
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        if !isDrawing {
+                            isDrawing = true
+                            scanner.beginObjectVolume(at: value.startLocation)
                         }
-                        .padding(10)
-                        .background(.black.opacity(0.58), in: Capsule())
+                        scanner.resizeObjectVolume(to: value.location)
                     }
-                    .contentShape(RoundedRectangle(cornerRadius: 22))
-                    .gesture(
-                        DragGesture()
-                            .onChanged { value in
-                                if dragStart == nil { dragStart = region }
-                                guard let dragStart else { return }
-                                let desiredX = dragStart.x + value.translation.width / proxy.size.width
-                                let desiredY = dragStart.y + value.translation.height / proxy.size.height
-                                move(CGSize(width: desiredX - region.x, height: desiredY - region.y))
-                            }
-                            .onEnded { _ in dragStart = nil }
-                    )
+                    .onEnded { _ in isDrawing = false }
+            )
+            .overlay(alignment: .top) {
+                Text(scanner.objectScanVolume == nil ? "Teken een cirkel op de vloer rond het voorwerp" : "Groene cirkel = het scanvolume")
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 12).padding(.vertical, 7)
+                    .background(.black.opacity(0.62), in: Capsule())
+                    .padding(.top, 74)
+                    .allowsHitTesting(false)
             }
-        }
-    }
-}
-
-private struct ScanAreaShade: Shape {
-    let frame: CGRect
-    func path(in rect: CGRect) -> Path {
-        var path = Path(rect)
-        path.addRoundedRect(in: frame, cornerSize: CGSize(width: 22, height: 22))
-        return path
     }
 }
 

@@ -18,9 +18,7 @@ final class GeometryFusion {
         frame: ARFrame,
         sampleStride: Int = 4,
         captureTarget: CaptureTarget = .object,
-        objectRegion: ObjectScanRegion = .initial,
-        orientation: UIInterfaceOrientation = .portrait,
-        viewport: CGSize = .zero
+        objectVolume: ObjectScanVolume?
     ) -> QualitySummary {
         guard let depthData = frame.sceneDepth else { return summary() }
         let confidence = depthData.confidenceMap
@@ -37,9 +35,6 @@ final class GeometryFusion {
         let depthRow = CVPixelBufferGetBytesPerRow(depth)
         let confidenceRow = confidence.map(CVPixelBufferGetBytesPerRow)
         let imageSize = frame.camera.imageResolution
-        let displayTransform = viewport.width > 0 && viewport.height > 0
-            ? frame.displayTransform(for: orientation, viewportSize: viewport)
-            : .identity
         var intrinsics = frame.camera.intrinsics
         intrinsics.columns.0.x *= Float(depthWidth) / Float(imageSize.width)
         intrinsics.columns.1.y *= Float(depthHeight) / Float(imageSize.height)
@@ -49,37 +44,20 @@ final class GeometryFusion {
         let sampler = YCbCrSampler(buffer: frame.capturedImage)
 
         let isFloat16 = CVPixelBufferGetPixelFormatType(depth) == kCVPixelFormatType_DepthFloat16
-        let targetDepth = captureTarget == .object
-            ? estimatedTargetDepth(
-                base: depthBase,
-                rowBytes: depthRow,
-                width: depthWidth,
-                height: depthHeight,
-                isFloat16: isFloat16,
-                center: objectRegion.depthCenter(displayTransform: displayTransform)
-            )
-            : nil
         for y in Swift.stride(from: 0, to: depthHeight, by: sampleStride) {
             let confidenceLine = confidenceBase.map { $0.advanced(by: y * (confidenceRow ?? 0)).assumingMemoryBound(to: UInt8.self) }
             for x in Swift.stride(from: 0, to: depthWidth, by: sampleStride) {
                 if let confidenceLine, confidenceLine[x] < 1 { continue }
                 let distance = depthValue(base: depthBase, rowBytes: depthRow, x: x, y: y, isFloat16: isFloat16)
                 guard distance.isFinite, distance > 0.08, distance < 8 else { continue }
-                if captureTarget == .object {
-                    guard objectRegion.contains(
-                        depthX: x,
-                        depthY: y,
-                        depthWidth: depthWidth,
-                        depthHeight: depthHeight,
-                        displayTransform: displayTransform
-                    ) else { continue }
-                    if let targetDepth, abs(distance - targetDepth) > 0.35 { continue }
-                }
                 let local = SIMD4<Float>((Float(x) - intrinsics.columns.2.x) * distance / intrinsics.columns.0.x,
                                          (Float(y) - intrinsics.columns.2.y) * distance / intrinsics.columns.1.y,
                                          -distance, 1)
                 let world4 = simd_mul(frame.camera.transform, local)
                 let world = SIMD3<Float>(world4.x, world4.y, world4.z)
+                if captureTarget == .object {
+                    guard let objectVolume, objectVolume.contains(world) else { continue }
+                }
                 let direction = world - cameraPosition
                 let key = VoxelKey(world, cellSize: cellSize)
                 let color = sampler.color(depthX: x, depthY: y, depthWidth: depthWidth, depthHeight: depthHeight)
@@ -147,21 +125,6 @@ final class GeometryFusion {
                 quality: bucket.qualityTotal / Float(bucket.count)
             )
         }
-    }
-
-    private func estimatedTargetDepth(base: UnsafeMutableRawPointer, rowBytes: Int, width: Int, height: Int, isFloat16: Bool, center: CGPoint) -> Float? {
-        let centerX = min(width - 1, max(0, Int(center.x * CGFloat(width))))
-        let centerY = min(height - 1, max(0, Int(center.y * CGFloat(height))))
-        var samples: [Float] = []
-        for y in max(0, centerY - 5)...min(height - 1, centerY + 5) {
-            for x in max(0, centerX - 5)...min(width - 1, centerX + 5) {
-                let value = depthValue(base: base, rowBytes: rowBytes, x: x, y: y, isFloat16: isFloat16)
-                if value.isFinite, value > 0.08, value < 8 { samples.append(value) }
-            }
-        }
-        guard !samples.isEmpty else { return nil }
-        samples.sort()
-        return samples[samples.count / 2]
     }
 
     private func depthValue(base: UnsafeMutableRawPointer, rowBytes: Int, x: Int, y: Int, isFloat16: Bool) -> Float {
