@@ -37,7 +37,15 @@ final class FusedSurfelOverlay {
             usesFloatComponents: false, componentsPerVector: 3,
             bytesPerComponent: MemoryLayout<UInt8>.size, dataOffset: 0, dataStride: 3
         )
-        let points = SCNGeometryElement(indices: nil, primitiveType: .point, primitiveCount: surfels.count)
+        var indices = Data(capacity: surfels.count * MemoryLayout<UInt16>.size)
+        for offset in 0..<surfels.count {
+            var index = UInt16(offset)
+            withUnsafeBytes(of: &index) { indices.append(contentsOf: $0) }
+        }
+        let points = SCNGeometryElement(
+            data: indices, primitiveType: .point,
+            primitiveCount: surfels.count, bytesPerIndex: MemoryLayout<UInt16>.size
+        )
         points.pointSize = 3
         points.minimumPointScreenSpaceRadius = 1
         points.maximumPointScreenSpaceRadius = 4
