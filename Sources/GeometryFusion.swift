@@ -96,17 +96,41 @@ final class GeometryFusion {
     }
 
     func projectedCells(camera: ARCamera, viewport: CGSize) -> [ProjectedQualityCell] {
-        voxels.values.compactMap { voxel in
-            guard voxel.observations >= 2 else { return nil }
+        guard viewport.width > 0, viewport.height > 0 else { return [] }
+        // Thousands of individual voxels can project to the same screen area. Aggregate
+        // them to a coarse screen grid so the camera remains visible while scanning.
+        let side = max(CGFloat(54), min(CGFloat(76), min(viewport.width, viewport.height) / 12))
+        var buckets: [ScreenGridKey: ScreenGridBucket] = [:]
+        for voxel in voxels.values {
+            guard voxel.observations >= 2 else { continue }
             let p = camera.projectPoint(voxel.position, orientation: .landscapeRight, viewportSize: viewport)
-            guard p.x.isFinite, p.y.isFinite, p.x >= 0, p.y >= 0, p.x <= viewport.width, p.y <= viewport.height else { return nil }
-            return ProjectedQualityCell(point: p, quality: voxel.quality)
+            guard p.x.isFinite, p.y.isFinite, p.x >= 0, p.y >= 0, p.x <= viewport.width, p.y <= viewport.height else { continue }
+            let key = ScreenGridKey(x: Int(p.x / side), y: Int(p.y / side))
+            if var bucket = buckets[key] {
+                bucket.qualityTotal += voxel.quality
+                bucket.count += 1
+                buckets[key] = bucket
+            } else {
+                let center = CGPoint(x: (CGFloat(key.x) + 0.5) * side, y: (CGFloat(key.y) + 0.5) * side)
+                buckets[key] = ScreenGridBucket(point: center, qualityTotal: voxel.quality, count: 1)
+            }
+        }
+        return buckets.values.compactMap { bucket in
+            guard bucket.count >= 2 else { return nil }
+            return ProjectedQualityCell(point: bucket.point, quality: bucket.qualityTotal / Float(bucket.count))
         }
     }
 }
 
 struct ProjectedQualityCell: Identifiable {
     let id = UUID(); let point: CGPoint; let quality: Float
+}
+
+private struct ScreenGridKey: Hashable { let x: Int; let y: Int }
+private struct ScreenGridBucket {
+    let point: CGPoint
+    var qualityTotal: Float
+    var count: Int
 }
 
 private final class YCbCrSampler {

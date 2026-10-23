@@ -19,7 +19,7 @@ enum RescanAdvice: String, Codable, CaseIterable {
     case moveCloser = "Ga 20–40 cm dichterbij en houd het oppervlak in beeld."
     case changeAngle = "Beweeg zijwaarts: dit gebied heeft te weinig kijkhoeken."
     case holdSteady = "Houd de iPad stil: de metingen zijn nog niet consistent."
-    case revisit = "Scan dit oranje gebied opnieuw vanuit twee richtingen."
+    case revisit = "Volg de gemarkeerde zones en neem twee extra kijkhoeken."
     case complete = "Dit zichtbare gebied heeft voldoende bruikbare data."
 }
 

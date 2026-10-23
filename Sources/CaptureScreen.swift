@@ -79,7 +79,7 @@ struct CaptureScreen: View {
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("LIVE 3D-KAART").font(.system(size: 9, weight: .bold, design: .monospaced)).tracking(1)
-                Text("groen is sterk\noranje opnieuw").font(.system(size: 9)).foregroundStyle(.secondary)
+                Text("rood = opnieuw\noranje = deels\ngroen = sterk").font(.system(size: 9)).foregroundStyle(.secondary)
             }
             LiveQualityMap(cells: scanner.projectedCells).frame(width: 112, height: 112)
         }
@@ -241,10 +241,14 @@ private struct QualityOverlay: View {
     let cells: [ProjectedQualityCell]
     var body: some View {
         Canvas { context, _ in
-            for cell in cells {
-                let color: Color = cell.quality >= 0.72 ? .green : cell.quality >= 0.42 ? .orange : .red
-                let radius: CGFloat = cell.quality >= 0.72 ? 4 : 6
-                context.fill(Path(ellipseIn: CGRect(x: cell.point.x - radius, y: cell.point.y - radius, width: radius * 2, height: radius * 2)), with: .color(color.opacity(0.62)))
+            // The camera gets only the most urgent rescan hints. The complete grid is
+            // still visible in the compact Live 3D map, without obscuring reality.
+            let hints = cells.filter { $0.quality < 0.55 }.sorted { $0.quality < $1.quality }.prefix(24)
+            for cell in hints {
+                let color: Color = cell.quality < 0.25 ? .red : .orange
+                let radius: CGFloat = 8
+                let marker = Path(ellipseIn: CGRect(x: cell.point.x - radius, y: cell.point.y - radius, width: radius * 2, height: radius * 2))
+                context.stroke(marker, with: .color(color.opacity(0.45)), lineWidth: 2)
             }
         }
     }
