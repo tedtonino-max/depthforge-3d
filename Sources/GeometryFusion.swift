@@ -1,6 +1,7 @@
 import ARKit
 import Foundation
 import simd
+import UIKit
 
 /// Sparse, running geometric fusion. Each cell retains the measured centroid,
 /// observation count, depth variance and incoming viewing directions; it never
@@ -13,7 +14,7 @@ final class GeometryFusion {
 
     func reset() { voxels.removeAll(keepingCapacity: true) }
 
-    func integrate(frame: ARFrame, sampleStride: Int = 4) -> QualitySummary {
+    func integrate(frame: ARFrame, sampleStride: Int = 4, captureTarget: CaptureTarget = .object) -> QualitySummary {
         guard let depthData = frame.sceneDepth else { return summary() }
         let confidence = depthData.confidenceMap
         let depth = depthData.depthMap
@@ -38,19 +39,23 @@ final class GeometryFusion {
         let sampler = YCbCrSampler(buffer: frame.capturedImage)
 
         let isFloat16 = CVPixelBufferGetPixelFormatType(depth) == kCVPixelFormatType_DepthFloat16
+        let targetDepth = captureTarget == .object
+            ? estimatedTargetDepth(base: depthBase, rowBytes: depthRow, width: depthWidth, height: depthHeight, isFloat16: isFloat16)
+            : nil
         for y in Swift.stride(from: 0, to: depthHeight, by: sampleStride) {
             let confidenceLine = confidenceBase.map { $0.advanced(by: y * (confidenceRow ?? 0)).assumingMemoryBound(to: UInt8.self) }
             for x in Swift.stride(from: 0, to: depthWidth, by: sampleStride) {
                 if let confidenceLine, confidenceLine[x] < 1 { continue }
-                let distance: Float
-                if isFloat16 {
-                    let line = depthBase.advanced(by: y * depthRow).assumingMemoryBound(to: Float16.self)
-                    distance = Float(line[x])
-                } else {
-                    let line = depthBase.advanced(by: y * depthRow).assumingMemoryBound(to: Float.self)
-                    distance = line[x]
-                }
+                let distance = depthValue(base: depthBase, rowBytes: depthRow, x: x, y: y, isFloat16: isFloat16)
                 guard distance.isFinite, distance > 0.08, distance < 8 else { continue }
+                if captureTarget == .object {
+                    let normalizedX = Float(x) / Float(depthWidth)
+                    let normalizedY = Float(y) / Float(depthHeight)
+                    // The window is deliberately conservative: it gives a tangible
+                    // object-focused PLY without pretending to segment the object.
+                    guard normalizedX > 0.18, normalizedX < 0.82, normalizedY > 0.14, normalizedY < 0.86 else { continue }
+                    if let targetDepth, abs(distance - targetDepth) > 0.35 { continue }
+                }
                 let local = SIMD4<Float>((Float(x) - intrinsics.columns.2.x) * distance / intrinsics.columns.0.x,
                                          (Float(y) - intrinsics.columns.2.y) * distance / intrinsics.columns.1.y,
                                          -distance, 1)
@@ -95,7 +100,7 @@ final class GeometryFusion {
         return output.data(using: .utf8) ?? Data()
     }
 
-    func projectedCells(camera: ARCamera, viewport: CGSize) -> [ProjectedQualityCell] {
+    func projectedCells(camera: ARCamera, viewport: CGSize, orientation: UIInterfaceOrientation) -> [ProjectedQualityCell] {
         guard viewport.width > 0, viewport.height > 0 else { return [] }
         // Thousands of individual voxels can project to the same screen area. Aggregate
         // them to a coarse screen grid so the camera remains visible while scanning.
@@ -103,7 +108,7 @@ final class GeometryFusion {
         var buckets: [ScreenGridKey: ScreenGridBucket] = [:]
         for voxel in voxels.values {
             guard voxel.observations >= 2 else { continue }
-            let p = camera.projectPoint(voxel.position, orientation: .landscapeRight, viewportSize: viewport)
+            let p = camera.projectPoint(voxel.position, orientation: orientation, viewportSize: viewport)
             guard p.x.isFinite, p.y.isFinite, p.x >= 0, p.y >= 0, p.x <= viewport.width, p.y <= viewport.height else { continue }
             let key = ScreenGridKey(x: Int(p.x / side), y: Int(p.y / side))
             if var bucket = buckets[key] {
@@ -117,13 +122,38 @@ final class GeometryFusion {
         }
         return buckets.values.compactMap { bucket in
             guard bucket.count >= 2 else { return nil }
-            return ProjectedQualityCell(point: bucket.point, quality: bucket.qualityTotal / Float(bucket.count))
+            return ProjectedQualityCell(
+                point: bucket.point,
+                normalizedPoint: CGPoint(x: bucket.point.x / viewport.width, y: bucket.point.y / viewport.height),
+                quality: bucket.qualityTotal / Float(bucket.count)
+            )
         }
+    }
+
+    private func estimatedTargetDepth(base: UnsafeMutableRawPointer, rowBytes: Int, width: Int, height: Int, isFloat16: Bool) -> Float? {
+        let centerX = width / 2, centerY = height / 2
+        var samples: [Float] = []
+        for y in max(0, centerY - 5)...min(height - 1, centerY + 5) {
+            for x in max(0, centerX - 5)...min(width - 1, centerX + 5) {
+                let value = depthValue(base: base, rowBytes: rowBytes, x: x, y: y, isFloat16: isFloat16)
+                if value.isFinite, value > 0.08, value < 8 { samples.append(value) }
+            }
+        }
+        guard !samples.isEmpty else { return nil }
+        samples.sort()
+        return samples[samples.count / 2]
+    }
+
+    private func depthValue(base: UnsafeMutableRawPointer, rowBytes: Int, x: Int, y: Int, isFloat16: Bool) -> Float {
+        if isFloat16 {
+            return Float(base.advanced(by: y * rowBytes).assumingMemoryBound(to: Float16.self)[x])
+        }
+        return base.advanced(by: y * rowBytes).assumingMemoryBound(to: Float.self)[x]
     }
 }
 
 struct ProjectedQualityCell: Identifiable {
-    let id = UUID(); let point: CGPoint; let quality: Float
+    let id = UUID(); let point: CGPoint; let normalizedPoint: CGPoint; let quality: Float
 }
 
 private struct ScreenGridKey: Hashable { let x: Int; let y: Int }

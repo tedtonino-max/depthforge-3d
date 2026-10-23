@@ -15,6 +15,22 @@ enum CaptureProfile: String, CaseIterable, Identifiable {
     var sampleStride: Int { self == .maximumGeometry ? 2 : 4 }
 }
 
+/// The raw depth frames always remain complete. This choice only controls the
+/// live fusion and its guidance, so a small object does not become a room-sized
+/// PLY by accident.
+enum CaptureTarget: String, CaseIterable, Identifiable {
+    case object
+    case room
+
+    var id: String { rawValue }
+    var title: String { self == .object ? "Voorwerp" : "Ruimte" }
+    var detail: String {
+        self == .object
+            ? "Houd het voorwerp binnen het middenkader"
+            : "Leg de volledige kamer vast met RoomPlan"
+    }
+}
+
 enum RescanAdvice: String, Codable, CaseIterable {
     case moveCloser = "Ga 20–40 cm dichterbij en houd het oppervlak in beeld."
     case changeAngle = "Beweeg zijwaarts: dit gebied heeft te weinig kijkhoeken."

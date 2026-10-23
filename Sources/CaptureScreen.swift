@@ -14,7 +14,9 @@ struct CaptureScreen: View {
     var body: some View {
         ZStack {
             CameraPreview(view: scanner.sceneView).ignoresSafeArea()
-            QualityOverlay(cells: scanner.projectedCells).ignoresSafeArea().allowsHitTesting(false)
+            if isScanning, scanner.captureTarget == .object {
+                ObjectTargetGuide().ignoresSafeArea().allowsHitTesting(false)
+            }
             VStack {
                 topBar
                 Spacer()
@@ -47,6 +49,16 @@ struct CaptureScreen: View {
                         }
                     }
                 }
+                Section("Wat wil je scannen?") {
+                    ForEach(CaptureTarget.allCases) { target in
+                        Button {
+                            scanner.captureTarget = target
+                        } label: {
+                            Label(target.title, systemImage: scanner.captureTarget == target ? "checkmark" : "circle")
+                        }
+                        .disabled(isScanning)
+                    }
+                }
             } label: {
                 Image(systemName: "line.3.horizontal")
                     .font(.headline).frame(width: 44, height: 44)
@@ -60,10 +72,11 @@ struct CaptureScreen: View {
                 if isScanning { QualityRing(percent: scanner.quality.meanConsistency).frame(width: 44, height: 44) }
                 VStack(alignment: .trailing, spacing: 2) {
                     Text("DEPTHFORGE 3D").font(.caption.weight(.bold)).tracking(1)
-                    Text(stateTitle).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                    Text(isScanning ? "\(scanner.captureTarget.title) · \(stateTitle)" : stateTitle)
+                        .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
                     if isScanning {
-                        Text("\(scanner.quality.usableMeasurements) metingen · \(Int(scanner.quality.meanViewDiversity * 100))% hoeken")
-                            .font(.caption2.monospacedDigit())
+                        Text("\(scanner.quality.coveredCells) sterk · \(scanner.quality.weakCells) nog verbeteren")
+                            .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
                     } else {
                         Text(scanner.captureProfile.title).font(.caption2)
                     }
@@ -78,8 +91,9 @@ struct CaptureScreen: View {
     private var liveMap: some View {
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("LIVE 3D-KAART").font(.system(size: 9, weight: .bold, design: .monospaced)).tracking(1)
-                Text("rood = opnieuw\noranje = deels\ngroen = sterk").font(.system(size: 9)).foregroundStyle(.secondary)
+                Text("DIT KADER").font(.system(size: 9, weight: .bold, design: .monospaced)).tracking(1)
+                Text(qualityMessage).font(.system(size: 10, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
+                Text("rood = opnieuw\noranje = extra hoek\ngroen = klaar").font(.system(size: 9)).foregroundStyle(.secondary)
             }
             LiveQualityMap(cells: scanner.projectedCells).frame(width: 112, height: 112)
         }
@@ -94,11 +108,13 @@ struct CaptureScreen: View {
         case .idle:
             panel {
                 Label("Klaar om te scannen", systemImage: "viewfinder").font(.headline)
-                Text("DepthForge legt LiDAR-diepte, confidence, RGB, cameraposes en calibratie lokaal vast.")
+                Text(scanner.captureTarget == .object
+                     ? "Houd één voorwerp in het middenkader. De PLY-fusie volgt alleen dat venster; ruwe frames blijven volledig lokaal bewaard."
+                     : "DepthForge legt de ruimte vast met LiDAR, RGB, cameraposes en RoomPlan.")
                     .font(.footnote).foregroundStyle(.secondary)
                 HStack {
                     Image(systemName: scanner.captureProfile == .maximumGeometry ? "scope" : "speedometer")
-                    Text(scanner.captureProfile.detail).font(.caption)
+                    Text("\(scanner.captureTarget.detail) · \(scanner.captureProfile.detail)").font(.caption)
                     Spacer()
                     Button("Start scan", action: scanner.start).buttonStyle(.borderedProminent).controlSize(.large)
                 }
@@ -158,6 +174,16 @@ struct CaptureScreen: View {
         case .finishing: "Opslaan"
         case .finished: "Opgeslagen"
         case .failed: "Actie nodig"
+        }
+    }
+
+    private var qualityMessage: String {
+        switch scanner.quality.advice {
+        case .moveCloser: "Nog geen bruikbare diepte"
+        case .changeAngle: "Beweeg 30 cm zijwaarts"
+        case .holdSteady: "Houd 1 seconde stil"
+        case .revisit: "Neem twee extra hoeken"
+        case .complete: "Dit beeld is sterk"
         }
     }
 
@@ -221,35 +247,38 @@ private struct LiveQualityMap: View {
     var body: some View {
         Canvas { context, size in
             context.fill(Path(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: 8), with: .color(.black.opacity(0.18)))
-            guard let first = cells.first else { return }
-            let minX = cells.map(\.point.x).min() ?? first.point.x
-            let maxX = cells.map(\.point.x).max() ?? first.point.x + 1
-            let minY = cells.map(\.point.y).min() ?? first.point.y
-            let maxY = cells.map(\.point.y).max() ?? first.point.y + 1
-            let spanX = max(1, maxX - minX), spanY = max(1, maxY - minY)
             for cell in cells {
-                let x = 8 + (cell.point.x - minX) / spanX * (size.width - 16)
-                let y = 8 + (cell.point.y - minY) / spanY * (size.height - 16)
+                let x = 8 + cell.normalizedPoint.x * (size.width - 16)
+                let y = 8 + cell.normalizedPoint.y * (size.height - 16)
                 let color: Color = cell.quality >= 0.72 ? .green : cell.quality >= 0.42 ? .orange : .red
-                context.fill(Path(ellipseIn: CGRect(x: x - 3, y: y - 3, width: 6, height: 6)), with: .color(color))
+                context.fill(Path(roundedRect: CGRect(x: x - 4, y: y - 4, width: 8, height: 8), cornerRadius: 2), with: .color(color))
             }
         }
     }
 }
 
-private struct QualityOverlay: View {
-    let cells: [ProjectedQualityCell]
+private struct ObjectTargetGuide: View {
     var body: some View {
-        Canvas { context, _ in
-            // The camera gets only the most urgent rescan hints. The complete grid is
-            // still visible in the compact Live 3D map, without obscuring reality.
-            let hints = cells.filter { $0.quality < 0.55 }.sorted { $0.quality < $1.quality }.prefix(24)
-            for cell in hints {
-                let color: Color = cell.quality < 0.25 ? .red : .orange
-                let radius: CGFloat = 8
-                let marker = Path(ellipseIn: CGRect(x: cell.point.x - radius, y: cell.point.y - radius, width: radius * 2, height: radius * 2))
-                context.stroke(marker, with: .color(color.opacity(0.45)), lineWidth: 2)
+        GeometryReader { proxy in
+            let width = proxy.size.width * 0.64
+            let height = min(proxy.size.height * 0.46, width * 1.15)
+            VStack(spacing: 8) {
+                Text("PLAATS HET VOORWERP IN DIT KADER")
+                    .font(.caption2.weight(.bold)).tracking(0.7)
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(.black.opacity(0.55), in: Capsule())
+                RoundedRectangle(cornerRadius: 22)
+                    .stroke(.white.opacity(0.88), style: StrokeStyle(lineWidth: 2, dash: [10, 8]))
+                    .frame(width: width, height: height)
+                    .overlay(alignment: .bottom) {
+                        Text("Beweeg daarna rustig links en rechts")
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(.black.opacity(0.55), in: Capsule())
+                            .offset(y: 22)
+                    }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }

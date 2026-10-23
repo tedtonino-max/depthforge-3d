@@ -14,6 +14,7 @@ final class CaptureController: NSObject, ObservableObject {
     @Published private(set) var metalEnabled = false
     @Published private(set) var roomPlanAvailable = false
     @Published var captureProfile: CaptureProfile = .maximumGeometry
+    @Published var captureTarget: CaptureTarget = .object
     @Published var showShareSheet = false
     @Published private(set) var shareURL: URL?
 
@@ -42,7 +43,7 @@ final class CaptureController: NSObject, ObservableObject {
         }
         do {
             scanRoot = try store.beginNewScan()
-            fusion.reset(); sequence = 0; completedRoom = nil; roomPlanAvailable = false; shareURL = nil; lastSavedTimestamp = 0; lastHeatmapTimestamp = 0; lastConfigurationCheckTimestamp = 0
+            fusion.reset(); projectedCells = []; quality = QualitySummary(); sequence = 0; completedRoom = nil; roomPlanAvailable = false; shareURL = nil; lastSavedTimestamp = 0; lastHeatmapTimestamp = 0; lastConfigurationCheckTimestamp = 0
             let configuration = ARWorldTrackingConfiguration()
             configuration.frameSemantics = [.sceneDepth, .smoothedSceneDepth]
             if ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) { configuration.sceneReconstruction = .meshWithClassification }
@@ -54,7 +55,9 @@ final class CaptureController: NSObject, ObservableObject {
             roomSession = room
             ensureGeometryDepthConfiguration()
             state = .recording
-            statusLine = "LiDAR wordt gestart; richt op een wand of object met detail."
+            statusLine = captureTarget == .object
+                ? "Plaats het voorwerp volledig binnen het middenkader."
+                : "LiDAR wordt gestart; richt op een wand of object met detail."
         } catch { state = .failed("Lokale opslag kon niet worden voorbereid: \(error.localizedDescription)") }
     }
 
@@ -139,7 +142,7 @@ extension CaptureController: ARSessionDelegate {
             }
             guard timestamp - self.lastSavedTimestamp >= self.captureProfile.frameInterval else { return }
             self.lastSavedTimestamp = timestamp; self.sequence += 1
-            self.quality = self.fusion.integrate(frame: frame, sampleStride: self.captureProfile.sampleStride)
+            self.quality = self.fusion.integrate(frame: frame, sampleStride: self.captureProfile.sampleStride, captureTarget: self.captureTarget)
             self.store.append(frame: frame, sequence: self.sequence) { result in
                 Task { @MainActor [weak self] in
                     if case .failure(let error) = result {
@@ -150,7 +153,8 @@ extension CaptureController: ARSessionDelegate {
             }
             if timestamp - self.lastHeatmapTimestamp > 0.5 {
                 self.lastHeatmapTimestamp = timestamp
-                self.projectedCells = self.fusion.projectedCells(camera: frame.camera, viewport: self.sceneView.bounds.size)
+                let orientation = self.sceneView.window?.windowScene?.interfaceOrientation ?? .portrait
+                self.projectedCells = self.fusion.projectedCells(camera: frame.camera, viewport: self.sceneView.bounds.size, orientation: orientation)
                 self.statusLine = self.quality.advice.rawValue
                 try? self.store.checkpoint(roomPlanFile: self.roomPlanAvailable ? "room/room.usdz" : nil)
             }
@@ -170,6 +174,7 @@ extension CaptureController: RoomCaptureSessionDelegate {
     nonisolated func captureSession(_ session: RoomCaptureSession, didProvide instruction: RoomCaptureSession.Instruction) {
         Task { @MainActor [weak self] in
             guard let self, self.state == .recording else { return }
+            guard self.captureTarget == .room else { return }
             switch instruction {
             case .moveCloseToWall: self.statusLine = "Ga 20–40 cm dichterbij voor meer detail."
             case .moveAwayFromWall: self.statusLine = "Ga iets naar achteren zodat het oppervlak volledig zichtbaar is."
