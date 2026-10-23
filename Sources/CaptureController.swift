@@ -104,6 +104,10 @@ extension CaptureController: ARSessionDelegate {
     nonisolated func session(_ session: ARSession, didUpdate frame: ARFrame) {
         Task { @MainActor [weak self] in
             guard let self, self.state == .recording, case .normal = frame.camera.trackingState else { return }
+            guard frame.sceneDepth != nil else {
+                self.statusLine = "LiDAR-diepte wordt geïnitialiseerd…"
+                return
+            }
             let timestamp = frame.timestamp
             guard timestamp - self.lastSavedTimestamp >= 0.25 else { return } // preserves enough CPU headroom for tracking
             self.lastSavedTimestamp = timestamp; self.sequence += 1
@@ -112,7 +116,7 @@ extension CaptureController: ARSessionDelegate {
                 Task { @MainActor [weak self] in
                     if case .failure(let error) = result {
                         self?.state = .failed("Opslaan mislukt: \(error.localizedDescription)")
-                        self?.statusLine = "Opslaan gestopt; er is geen scan verloren zonder melding. Start opnieuw nadat de fout is opgelost."
+                        self?.statusLine = "Opslaan mislukt: \(error.localizedDescription)"
                     }
                 }
             }
