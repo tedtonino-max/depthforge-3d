@@ -19,11 +19,9 @@ jobs:
         run: brew install xcodegen
 
       - name: Generate Xcode project
-        working-directory: DepthForge3D
         run: xcodegen generate
 
       - name: Build unsigned iPadOS app
-        working-directory: DepthForge3D
         run: |
           xcodebuild \
             -project DepthForge3D.xcodeproj \
@@ -36,7 +34,6 @@ jobs:
             build
 
       - name: Package IPA
-        working-directory: DepthForge3D
         run: |
           mkdir -p Payload
           cp -R build/Build/Products/Debug-iphoneos/DepthForge3D.app Payload/
@@ -46,5 +43,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: depthforge3d-unsigned-ipa
-          path: DepthForge3D/DepthForge3D-unsigned.ipa
+          path: DepthForge3D-unsigned.ipa
           if-no-files-found: error
