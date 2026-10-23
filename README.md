@@ -12,8 +12,8 @@ project wijzigt HouseCapture niet en gebruikt geen netwerkverkeer.
 - toont een live kwaliteitslaag met meetdichtheid, kijkhoekdiversiteit,
   consistentie en gaten, plus een concrete rescan-instructie;
 - maakt checkpoints tijdens het opnemen, hervat een bestaande opname en
-  exporteert een portable ZIP met ASCII PLY en RoomPlan-resultaat wanneer
-  beschikbaar.
+  exporteert een ASCII PLY; de volledige ruwe opname blijft als lokale scanmap
+  beschikbaar naast het RoomPlan-resultaat wanneer dat beschikbaar is.
 
 `sceneDepth` is LiDAR-data op de resolutie en nauwkeurigheid die ARKit op het
 toestel levert. De app claimt geen sub-millimeternauwkeurigheid: dat is voor de

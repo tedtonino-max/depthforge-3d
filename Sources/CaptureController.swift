@@ -79,11 +79,8 @@ final class CaptureController: NSObject, ObservableObject {
         do {
             let ply = root.appendingPathComponent("exports/\(root.lastPathComponent).ply")
             try fusion.plyData().write(to: ply, options: .atomic)
-            let archive = root.deletingLastPathComponent().appendingPathComponent("\(root.lastPathComponent).zip")
-            try? FileManager.default.removeItem(at: archive)
-            try FileManager.default.zipItem(at: root, to: archive, shouldKeepParent: true)
-            shareURL = archive; showShareSheet = true
-            statusLine = "Export gemaakt: \(archive.lastPathComponent)"
+            shareURL = ply; showShareSheet = true
+            statusLine = "PLY-export gemaakt; de volledige ruwe scanmap blijft lokaal beschikbaar."
         } catch { statusLine = "Export mislukt: \(error.localizedDescription)" }
     }
 
@@ -139,8 +136,12 @@ extension CaptureController: RoomCaptureSessionDelegate {
         Task { @MainActor [weak self] in
             guard let self else { return }
             if let error { self.statusLine = "RoomPlan niet beschikbaar: \(error.localizedDescription)"; self.finalize(room: nil); return }
-            RoomBuilder(options: [.beautifyObjects]).capturedRoom(from: data) { room in
-                Task { @MainActor [weak self] in self?.finalize(room: room) }
+            do {
+                let room = try RoomBuilder(options: [.beautifyObjects]).capturedRoom(from: data)
+                self.finalize(room: room)
+            } catch {
+                self.statusLine = "RoomPlan-resultaat kon niet worden opgebouwd; ruwe scan blijft behouden."
+                self.finalize(room: nil)
             }
         }
     }

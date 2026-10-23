@@ -70,7 +70,7 @@ struct CaptureScreen: View {
             }
             Spacer()
             if scanner.state == .finished {
-                Button(action: scanner.exportAndShare) { Label("Exporteer PLY + ZIP", systemImage: "square.and.arrow.up") }.buttonStyle(SecondaryButton())
+                Button(action: scanner.exportAndShare) { Label("Exporteer PLY", systemImage: "square.and.arrow.up") }.buttonStyle(SecondaryButton())
             }
         }
     }
