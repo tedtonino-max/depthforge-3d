@@ -1,5 +1,6 @@
 import ARKit
 import Combine
+import ImageIO
 import RoomPlan
 import SceneKit
 import simd
@@ -8,333 +9,420 @@ import SwiftUI
 @MainActor
 final class CaptureController: NSObject, ObservableObject {
     @Published private(set) var state: ScanState = .idle
-    @Published private(set) var quality = QualitySummary()
-    @Published private(set) var projectedCells: [ProjectedQualityCell] = []
-    @Published private(set) var statusLine = "Klaar voor een LiDAR-scan"
+    @Published private(set) var quality = SurfaceQuality()
+    @Published private(set) var statusLine = "Kies wat je wilt scannen"
     @Published private(set) var scanRoot: URL?
-    @Published private(set) var metalEnabled = false
-    @Published private(set) var roomPlanAvailable = false
-    @Published private(set) var liveMeshPasses = 0
-    @Published private(set) var liveMeshTriangles = 0
-    @Published var captureProfile: CaptureProfile = .maximumGeometry
-    @Published var captureTarget: CaptureTarget = .object
     @Published private(set) var objectScanVolume: ObjectScanVolume?
+    @Published private(set) var detailZone: DetailZone?
+    @Published private(set) var pendingZone: DetailZone?
+    @Published private(set) var choosingDetail = false
+    @Published private(set) var photos: [PhotoPreview] = []
+    @Published private(set) var savedFrames = 0
+    @Published private(set) var resourceNotice: String?
+    @Published private(set) var roomNotice: String?
+    @Published var captureProfile: CaptureProfile = .maximumGeometry
+    @Published var selectedAreaOnly = false
+    @Published var brushRadius: Float = 0.08
+    @Published private(set) var meshFaces = 0
+    @Published private(set) var baseFaces = 0
+    private var lastBrushTime = -Double.infinity
+    @Published var captureTarget: CaptureTarget = .object
     @Published var showShareSheet = false
     @Published private(set) var shareURL: URL?
+    @Published var showSurface = true {
+        didSet {
+            baseOverlay.setVisible(showSurface)
+            if !showSurface { surfaceOverlay.hide() }
+            else if let lastUpdate, let lastPose, trackingReady {
+                surfaceOverlay.show(lastUpdate, pose: lastPose, volume: objectScanVolume)
+                if let frame = sceneView.session.currentFrame { surfaceOverlay.refreshVisibility(frame) }
+            }
+        }
+    }
 
     let sceneView = ARSCNView(frame: .zero)
-    private let store = DepthProjectStore()
-    private let fusion = GeometryFusion()
+    private let pipeline = CapturePipeline()
+    nonisolated private let gate = FrameGate()
+    private let baseOverlay = BaseMeshOverlay()
+    private let surfaceOverlay = FusedSurfaceOverlay()
+    private let volumeOverlay = ObjectScanVolumeOverlay()
+    private let zoneOverlay = DetailZoneOverlay()
     private var roomSession: RoomCaptureSession?
-    private var lastSavedTimestamp: TimeInterval = 0
-    private var lastHeatmapTimestamp: TimeInterval = 0
-    private var lastPreviewMeshTimestamp: TimeInterval = 0
-    private var lastConfigurationCheckTimestamp: TimeInterval = 0
-    private var sequence = 0
-    private var completedRoom: CapturedRoom?
-    private let accelerator = MetalFusionAccelerator()
-    private let liveMeshOverlay = LiveMeshOverlay()
-    private let progressiveMesh = ProgressiveDepthMeshOverlay()
-    private let objectVolumeOverlay = ObjectScanVolumeOverlay()
+    private var lastSaved: Double = 0
+    private var lastConfigurationCheck: Double = 0
+    private var interval: Double = 0.17
+    private var generation = UUID()
+    private var trackingReady = false
+    private var finishStarted = false
+    private var skipped = 0
+    private var readyFrames = 0
+    private var lastPose: CameraPose?
+    private var lastUpdate: SurfaceUpdate?
+    private var finalizeTask: Task<Void, Never>?
 
     override init() {
         super.init()
         sceneView.session.delegate = self
-        sceneView.delegate = liveMeshOverlay
-        sceneView.automaticallyUpdatesLighting = true
-        progressiveMesh.attach(to: sceneView.scene.rootNode)
-        objectVolumeOverlay.attach(to: sceneView.scene.rootNode)
-        metalEnabled = accelerator.isAvailable
+        sceneView.automaticallyUpdatesLighting = false
+        baseOverlay.attach(to: sceneView.scene.rootNode)
+        surfaceOverlay.attach(to: sceneView.scene.rootNode)
+        volumeOverlay.attach(to: sceneView.scene.rootNode)
+        zoneOverlay.attach(to: sceneView.scene.rootNode)
     }
 
     func start() {
+        guard state == .idle else { return }
         guard ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) else {
-            state = .failed("Dit apparaat ondersteunt geen LiDAR sceneDepth.")
-            return
+            state = .failed("Dit apparaat ondersteunt geen LiDAR-scans."); return
         }
+        generation = UUID(); trackingReady = false; finishStarted = false
+        photos = []; savedFrames = 0; meshFaces = 0; quality = SurfaceQuality(); roomNotice = nil
+        resourceNotice = nil; objectScanVolume = nil; detailZone = nil; pendingZone = nil
+        choosingDetail = false; shareURL = nil; scanRoot = nil; readyFrames = 0
+        baseOverlay.clear(); baseFaces = 0
+        surfaceOverlay.clear(); volumeOverlay.reset(); zoneOverlay.clear()
+        lastSaved = 0; skipped = 0; lastUpdate = nil; lastPose = nil
         let configuration = ARWorldTrackingConfiguration()
-        configuration.frameSemantics = [.sceneDepth, .smoothedSceneDepth]
-        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) { configuration.sceneReconstruction = .meshWithClassification }
+        configuration.frameSemantics = [.sceneDepth]
+        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) { configuration.sceneReconstruction = .mesh }
         configuration.planeDetection = [.horizontal, .vertical]
-        liveMeshOverlay.displaysNativeMesh = captureTarget == .room
         sceneView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
         if captureTarget == .object {
-            progressiveMesh.reset()
-            objectVolumeOverlay.reset()
-            objectScanVolume = nil
-            liveMeshPasses = 0
-            liveMeshTriangles = 0
-            state = .framing
-            statusLine = "Plaats en verschuif het scanvak. Er wordt nog niets opgeslagen."
-            return
-        }
-        beginRecording()
-    }
-
-    func confirmObjectVolume() {
-        guard state == .framing, objectScanVolume != nil else {
-            statusLine = "Teken eerst een cirkel op de vloer rond het voorwerp."
-            return
-        }
-        objectVolumeOverlay.setRecording(true)
-        beginRecording()
+            state = .framing; statusLine = "Teken een cirkel op de vloer rond het voorwerp"
+        } else { beginRecording() }
     }
 
     func beginObjectVolume(at point: CGPoint) {
-        guard state == .framing, let ground = groundPoint(at: point) else {
-            statusLine = "Richt eerst op een zichtbare vloer en teken de cirkel opnieuw."
-            return
+        guard state == .framing, let result = raycast(point, alignment: .horizontal) else {
+            statusLine = "Richt op een zichtbare vloer en teken opnieuw"; return
         }
-        let volume = ObjectScanVolume(center: ground)
-        objectScanVolume = volume
-        objectVolumeOverlay.show(volume, isRecording: false)
-        statusLine = "Scanvolume geplaatst. Sleep verder om de cirkel rond het voorwerp te zetten."
+        objectScanVolume = ObjectScanVolume(center: CameraPose(result.worldTransform).position)
+        if let objectScanVolume { volumeOverlay.show(objectScanVolume, isRecording: false) }
+        statusLine = "Sleep de cirkel tot het voorwerp erin past"
     }
-
     func resizeObjectVolume(to point: CGPoint) {
-        guard state == .framing,
-              let current = objectScanVolume,
-              let ground = groundPoint(at: point) else { return }
-        let delta = ground - current.center
-        objectScanVolume = current.resized(to: simd_length(SIMD2(delta.x, delta.z)))
-        if let objectScanVolume { objectVolumeOverlay.show(objectScanVolume, isRecording: false) }
+        guard state == .framing, let current = objectScanVolume,
+              let frame = sceneView.session.currentFrame else { return }
+        // Intersect every drag with the SAME floor, rather than jumping between
+        // estimated planes as a finger crosses furniture.
+        let size = sceneView.bounds.size
+        guard size.width > 0, size.height > 0 else { return }
+        let orientation = sceneView.window?.windowScene?.interfaceOrientation ?? .portrait
+        let inverse = frame.displayTransform(for: orientation, viewportSize: size).inverted()
+        let imagePoint = CGPoint(x: point.x / size.width, y: point.y / size.height).applying(inverse)
+        let k = frame.camera.intrinsics, resolution = frame.camera.imageResolution
+        let local = Vec3((Float(imagePoint.x * resolution.width) - k.columns.2.x) / k.columns.0.x,
+                         -(Float(imagePoint.y * resolution.height) - k.columns.2.y) / k.columns.1.y, -1)
+        let pose = CameraPose(frame.camera.transform), ray = pose.rotate(local)
+        guard abs(ray.y) > 0.01 else { return }
+        let t = (current.y - pose.position.y) / ray.y
+        guard t > 0 else { return }
+        let p = pose.position + ray * t
+        objectScanVolume = current.resized(to: length(Vec3(p.x - current.x, 0, p.z - current.z)))
+        if let objectScanVolume { volumeOverlay.show(objectScanVolume, isRecording: false) }
     }
-
+    func setVolumeHeight(_ height: Float) {
+        guard state == .framing, var volume = objectScanVolume else { return }
+        volume.height = min(3, max(0.2, height)); objectScanVolume = volume
+        volumeOverlay.show(volume, isRecording: false)
+    }
     func clearObjectVolume() {
         guard state == .framing else { return }
-        objectScanVolume = nil
-        objectVolumeOverlay.reset()
-        statusLine = "Teken een nieuwe cirkel op de vloer rond het voorwerp."
+        objectScanVolume = nil; volumeOverlay.reset(); statusLine = "Teken opnieuw op de vloer"
+    }
+    func confirmObjectVolume() {
+        guard state == .framing, objectScanVolume != nil else { return }
+        volumeOverlay.setRecording(true); beginRecording()
+    }
+    private func beginRecording() {
+        state = .preparing; statusLine = "Opname wordt voorbereid"
+        let token = generation
+        pipeline.begin(volume: captureTarget == .object ? objectScanVolume : nil, device: UIDevice.current.model) { [weak self] result in
+            Task { @MainActor in
+                guard let self, self.generation == token else { return }
+                switch result {
+                case .success(let root):
+                    self.scanRoot = root
+                    if self.captureTarget == .room && !self.selectedAreaOnly { self.beginRoomCapture() }
+                    self.ensureDepthConfiguration()
+                    self.state = .recording
+                    self.choosingDetail = self.captureTarget == .room && self.selectedAreaOnly
+                    self.statusLine = self.choosingDetail ? ScanAdvice.focus.rawValue : ScanAdvice.holdSteady.rawValue
+                case .failure(let error): self.fail(error)
+                }
+            }
+        }
     }
 
-    private func beginRecording() {
-        do {
-            scanRoot = try store.beginNewScan(objectVolume: captureTarget == .object ? objectScanVolume : nil)
-            fusion.reset(); progressiveMesh.reset(); projectedCells = []; quality = QualitySummary(); sequence = 0; completedRoom = nil; roomPlanAvailable = false; shareURL = nil; liveMeshPasses = 0; liveMeshTriangles = 0; lastSavedTimestamp = 0; lastHeatmapTimestamp = 0; lastPreviewMeshTimestamp = 0; lastConfigurationCheckTimestamp = 0
-            // For object mode the visible mesh must be the measured progressive
-            // depth mesh, not ARKit's coarse room reconstruction.
-            liveMeshOverlay.displaysNativeMesh = captureTarget == .room
-            if captureTarget == .room { beginRoomCapture() }
-            ensureGeometryDepthConfiguration()
-            state = .recording
-            statusLine = captureTarget == .object
-                ? "Scanvolume actief. Beweeg rustig om het voorwerp vanuit nieuwe hoeken te meten."
-                : "LiDAR wordt gestart; richt op een wand of object met detail."
-        } catch { state = .failed("Lokale opslag kon niet worden voorbereid: \(error.localizedDescription)") }
+    func chooseDetail() {
+        guard state == .recording else { return }
+        guard baseFaces > 0 else { statusLine = "Breng eerst de basisvorm in beeld"; return }
+        choosingDetail = true; pendingZone = nil; readyFrames = 0; surfaceOverlay.hide()
+        statusLine = "Schilder met je vinger over het gewenste gebied"
+    }
+    func selectDetail(at point: CGPoint) {
+        guard choosingDetail, state == .recording, let frame = sceneView.session.currentFrame,
+              frame.timestamp - lastBrushTime > 0.04 else { return }
+        lastBrushTime = frame.timestamp
+        guard let zone = DepthSelection.zone(frame: frame, point: point, viewport: sceneView.bounds.size,
+            orientation: sceneView.window?.windowScene?.interfaceOrientation ?? .portrait) else {
+            statusLine = "Dit punt heeft nog geen betrouwbare diepte; kies een naburig oppervlak"; return
+        }
+        if captureTarget == .object, objectScanVolume?.contains(zone.center) != true {
+            statusLine = "Kies een detail binnen het scanvolume"; return
+        }
+        var painted = pendingZone ?? zone
+        if painted.brush.contains(where: { length($0.center - zone.center) < brushRadius * 0.45 }) { return }
+        guard painted.brush.count < 128 else { statusLine = "Gebied gemarkeerd; start de scan of wis de selectie"; return }
+        painted.brush.append(DetailDab(center: zone.center, normal: zone.normal, radius: brushRadius))
+        pendingZone = painted; zoneOverlay.show(painted, confirmed: false)
+        statusLine = "Geschilderd gebied geselecteerd"
+    }
+    func confirmDetail() {
+        guard let zone = pendingZone else { return }
+        detailZone = zone; pendingZone = nil; choosingDetail = false; readyFrames = 0
+        quality = SurfaceQuality(); zoneOverlay.show(zone, confirmed: true)
+        statusLine = "Houd de detailzone in beeld en beweeg daarna zijwaarts"
+    }
+    func clearPaint() {
+        pendingZone = nil; zoneOverlay.clear(); statusLine = "Schilder opnieuw over het gewenste gebied"
+    }
+    func cancelDetail() {
+        if captureTarget == .room && selectedAreaOnly && detailZone == nil {
+            statusLine = "Markeer eerst een gebied om deze scan te starten"; return
+        }
+        choosingDetail = false; pendingZone = nil
+        if let zone = detailZone { zoneOverlay.show(zone, confirmed: true) } else { zoneOverlay.clear() }
+        statusLine = captureTarget == .room && detailZone == nil ? ScanAdvice.focus.rawValue : ScanAdvice.holdSteady.rawValue
     }
 
     func pauseOrResume() {
-        switch state {
-        case .recording:
-            // A pause must freeze the visual mesh and all incoming frames, not merely
-            // skip the PLY writer. RoomPlan is restarted on resume for room scans.
-            state = .paused
-            roomSession?.stop(pauseARSession: true)
-            roomSession = nil
-            sceneView.session.pause()
-            statusLine = "Scan is gepauzeerd. Mesh en opname staan stil."
-        case .paused:
-            if let configuration = sceneView.session.configuration {
-                sceneView.session.run(configuration, options: [])
-            }
-            if captureTarget == .room { beginRoomCapture() }
-            state = .recording
-            statusLine = "Opname hervat. Beweeg vanuit een nieuwe hoek."
-        default: break
+        if state == .recording {
+            state = .paused; sceneView.session.pause(); pipeline.resetStability()
+            statusLine = "Opname gepauzeerd"
+        } else if state == .paused || state == .review {
+            if let config = sceneView.session.configuration { sceneView.session.run(config) }
+            state = .recording; readyFrames = 0
+            statusLine = "Ga verder vanuit een nieuwe hoek"
         }
     }
-
-    func returnToStart() {
-        roomSession?.stop(pauseARSession: true)
-        roomSession = nil
-        sceneView.session.pause()
-        projectedCells = []
-        quality = QualitySummary()
-        progressiveMesh.reset()
-        objectVolumeOverlay.reset()
-        objectScanVolume = nil
-        liveMeshPasses = 0
-        liveMeshTriangles = 0
-        state = .idle
-        statusLine = "Kies eerst wat je wilt scannen."
-    }
-
-    func finish() {
+    func review() {
         guard state == .recording || state == .paused else { return }
-        state = .finishing; statusLine = "RoomPlan en de gefuseerde point cloud worden lokaal afgerond…"
-        roomSession?.stop(pauseARSession: true)
-        if roomSession == nil { finalize(room: nil) }
+        guard !(captureTarget == .room && selectedAreaOnly && detailZone == nil) else { return }
+        state = .review; choosingDetail = false; sceneView.session.pause(); pipeline.resetStability()
+        statusLine = "Controleer het bevestigde oppervlak; ontbrekend detail blijft open"
+        if let lastUpdate, let lastPose, showSurface {
+            surfaceOverlay.show(lastUpdate, pose: lastPose, volume: objectScanVolume)
+            if let frame = sceneView.session.currentFrame { surfaceOverlay.refreshVisibility(frame) }
+        }
     }
-
-    func exportAndShare() {
-        guard let root = scanRoot else { return }
-        do {
-            let ply = root.appendingPathComponent("exports/\(root.lastPathComponent).ply")
-            try fusion.plyData().write(to: ply, options: .atomic)
-            shareURL = ply; showShareSheet = true
-            statusLine = "PLY-export gemaakt; de volledige ruwe scanmap blijft lokaal beschikbaar."
-        } catch { statusLine = "Export mislukt: \(error.localizedDescription)" }
-    }
-
-    private func finalize(room: CapturedRoom?) {
-        do {
-            var roomFile: String?
-            if let room, let root = scanRoot {
-                let url = root.appendingPathComponent("room/room.usdz")
-                try room.export(to: url, exportOptions: .parametric)
-                roomFile = "room/room.usdz"; roomPlanAvailable = true
+    func finish() {
+        guard state == .review || state == .paused || state == .recording else { return }
+        state = .finishing; statusLine = "Scan en foto's worden opgeslagen"
+        sceneView.session.pause()
+        if let roomSession {
+            roomSession.stop(pauseARSession: true)
+            let token = generation
+            finalizeTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(15))
+                guard !Task.isCancelled, let self, self.generation == token, !self.finishStarted else { return }
+                self.roomNotice = "RoomPlan gaf geen resultaat; LiDAR en foto's zijn wel bewaard."
+                self.finalize(room: nil)
             }
-            if let root = scanRoot { try fusion.plyData().write(to: root.appendingPathComponent("exports/fused-live.ply"), options: .atomic) }
-            try store.close(roomPlanFile: roomFile)
-            state = .finished
-            statusLine = "Opname veilig opgeslagen. Export bevat ruwe frames, poses, calibratie en PLY."
-        } catch { state = .failed("Afronden mislukt: \(error.localizedDescription)") }
+        } else { finalize(room: nil) }
     }
-
+    private func finalize(room: CapturedRoom?) {
+        guard !finishStarted, state == .finishing else { return }
+        finishStarted = true; finalizeTask?.cancel()
+        var roomFile: String?
+        if let room, let root = scanRoot {
+            do {
+                try room.export(to: root.appendingPathComponent("room/room.usdz"), exportOptions: .parametric)
+                roomFile = "room/room.usdz"
+            } catch { roomNotice = "RoomPlan-export mislukt; LiDAR en foto's worden wel bewaard." }
+        }
+        let token = generation
+        pipeline.finish(roomFile: roomFile, skipped: skipped, baseMesh: baseOverlay.snapshot()) { [weak self] result in
+            Task { @MainActor in
+                guard let self, self.generation == token else { return }
+                switch result {
+                case .success(let url): self.shareURL = url; self.state = .finished; self.statusLine = "Scan lokaal opgeslagen"
+                case .failure(let error): self.fail(error)
+                }
+            }
+        }
+    }
+    func exportAndShare() { if shareURL != nil { showShareSheet = true } }
+    func returnToStart() {
+        guard state == .finished || state == .framing || state == .idle || isFailed else { return }
+        generation = UUID(); finalizeTask?.cancel()
+        roomSession?.stop(pauseARSession: true); roomSession = nil; sceneView.session.pause()
+        baseOverlay.clear(); baseFaces = 0
+        surfaceOverlay.clear(); volumeOverlay.reset(); zoneOverlay.clear(); state = .idle
+    }
+    private var isFailed: Bool { if case .failed = state { return true }; return false }
+    private func fail(_ error: Error) {
+        state = .failed(error.localizedDescription); sceneView.session.pause()
+        statusLine = error.localizedDescription; surfaceOverlay.hide()
+    }
     private func beginRoomCapture() {
         let room = RoomCaptureSession(arSession: sceneView.session)
-        room.delegate = self
-        room.run(configuration: .init())
-        roomSession = room
+        room.delegate = self; roomSession = room; room.run(configuration: .init())
     }
-
-    /// RoomPlan can replace the shared AR session configuration when it begins a capture.
-    /// Reapply required semantics without resetting tracking, then verify again during capture.
-    private func ensureGeometryDepthConfiguration() {
+    private func ensureDepthConfiguration() {
         guard let current = sceneView.session.configuration as? ARWorldTrackingConfiguration,
               let updated = current.copy() as? ARWorldTrackingConfiguration else { return }
-        var changed = false
-        if !updated.frameSemantics.contains(.sceneDepth) {
-            updated.frameSemantics.insert(.sceneDepth)
-            changed = true
+        let meshSupported = ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
+        guard !current.frameSemantics.contains(.sceneDepth) || (meshSupported && current.sceneReconstruction != .mesh) else { return }
+        updated.frameSemantics.insert(.sceneDepth)
+        if meshSupported { updated.sceneReconstruction = .mesh }
+        sceneView.session.run(updated)
+    }
+    private func raycast(_ point: CGPoint, alignment: ARRaycastQuery.TargetAlignment) -> ARRaycastResult? {
+        let targets: [ARRaycastQuery.Target] = [.existingPlaneGeometry, .estimatedPlane]
+        for target in targets {
+            if let query = sceneView.raycastQuery(from: point, allowing: target, alignment: alignment),
+               let result = sceneView.session.raycast(query).first { return result }
         }
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth), !updated.frameSemantics.contains(.smoothedSceneDepth) {
-            updated.frameSemantics.insert(.smoothedSceneDepth)
-            changed = true
+        return nil
+    }
+    private var imageOrientation: CGImagePropertyOrientation {
+        switch sceneView.window?.windowScene?.interfaceOrientation ?? .portrait {
+        case .portrait: return .right
+        case .portraitUpsideDown: return .left
+        case .landscapeLeft: return .up
+        case .landscapeRight: return .down
+        default: return .right
         }
-        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification), !updated.sceneReconstruction.contains(.meshWithClassification) {
-            updated.sceneReconstruction.insert(.meshWithClassification)
-            changed = true
+    }
+
+    private func receive(_ frame: ARFrame) {
+        guard state == .recording, case .normal = frame.camera.trackingState else { gate.release(); return }
+        trackingReady = true
+        if choosingDetail { gate.release(); return }
+        if captureTarget == .room && selectedAreaOnly && detailZone == nil { gate.release(); return }
+        if showSurface { surfaceOverlay.refreshVisibility(frame) }
+        if frame.timestamp - lastConfigurationCheck > 1 {
+            lastConfigurationCheck = frame.timestamp; ensureDepthConfiguration()
         }
-        if changed { sceneView.session.run(updated, options: []) }
+        guard frame.sceneDepth != nil else {
+            statusLine = "LiDAR wordt voorbereid; richt op een herkenbaar oppervlak"; gate.release(); return
+        }
+        let thermal = ProcessInfo.processInfo.thermalState
+        if thermal == .critical {
+            pauseOrResume(); resourceNotice = "iPad te warm; laat hem afkoelen voor je hervat"; gate.release(); return
+        }
+        let desired = max(captureProfile.frameInterval, thermal == .serious ? 0.5 : interval)
+        guard frame.timestamp - lastSaved >= desired else { gate.release(); return }
+        if frame.timestamp - lastSaved > desired * 1.8 && lastSaved > 0 { skipped += 1 }
+        lastSaved = frame.timestamp
+        let token = generation, selectedZone = detailZone?.id
+        pipeline.process(frame: frame, target: captureTarget, zone: detailZone, selectionOnly: captureTarget == .room && selectedAreaOnly,
+            stride: thermal == .serious ? 4 : captureProfile.sampleStride,
+            orientation: imageOrientation, skipped: skipped) { [weak self, gate] result in
+            Task { @MainActor in
+                defer { gate.release() }
+                guard let self, self.generation == token else { return }
+                switch result {
+                case .success(let output):
+                    self.savedFrames = output.savedFrames
+                    if let photo = output.photo { self.photos.append(photo) }
+                    self.interval = min(1, max(self.captureProfile.frameInterval, output.duration * 1.2))
+                    self.resourceNotice = output.surface.quality.capacityReached
+                        ? "Scankaart vol; bestaande geometrie wordt nog verfijnd"
+                        : (output.duration > 0.25 || output.surface.quality.limited || output.reducedDetail || thermal == .serious
+                           ? "Lager opnametempo om camera en opslag soepel te houden" : nil)
+                    guard selectedZone == self.detailZone?.id else { return }
+                    self.quality = output.surface.quality
+                    self.meshFaces = output.surface.mesh.faces.count / 3
+                    self.lastUpdate = output.surface; self.lastPose = output.pose
+                    if self.showSurface, self.detailZone != nil, self.trackingReady, self.state == .recording {
+                        self.surfaceOverlay.show(output.surface, pose: output.pose, volume: self.objectScanVolume)
+                        if let current = self.sceneView.session.currentFrame {
+                            self.surfaceOverlay.refreshVisibility(current)
+                        }
+                    }
+                    guard self.state == .recording, self.trackingReady, !self.choosingDetail else { return }
+
+                    self.readyFrames = self.quality.advice == .ready ? self.readyFrames + 1 : 0
+                    if self.detailZone == nil {
+                        self.statusLine = self.baseFaces == 0 ? "1 · Richt op vloer en object: basis wordt opgebouwd" : "1 · Basismesh zichtbaar — schilder een detail om te verfijnen"
+                    } else {
+                        self.statusLine = self.quality.advice == .ready && self.readyFrames < 3
+                            ? ScanAdvice.holdSteady.rawValue : self.quality.advice.rawValue
+                    }
+                case .failure(let error):
+                    if error is CaptureError { self.statusLine = error.localizedDescription }
+                    else { self.fail(error) }
+                }
+            }
+        }
     }
 }
 
 extension CaptureController: ARSessionDelegate {
-    nonisolated func session(_ session: ARSession, didUpdate frame: ARFrame) {
+    nonisolated func session(_ session: ARSession, didAdd anchors: [ARAnchor]) { updateBase(anchors) }
+    nonisolated func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) { updateBase(anchors) }
+    nonisolated private func updateBase(_ anchors: [ARAnchor]) {
+        let meshes = anchors.compactMap { $0 as? ARMeshAnchor }
+        guard !meshes.isEmpty else { return }
         Task { @MainActor [weak self] in
-            guard let self, self.state == .recording, case .normal = frame.camera.trackingState else { return }
-            let timestamp = frame.timestamp
-            if timestamp - self.lastConfigurationCheckTimestamp >= 0.5 {
-                self.lastConfigurationCheckTimestamp = timestamp
-                self.ensureGeometryDepthConfiguration()
-            }
-            guard frame.sceneDepth != nil else {
-                self.statusLine = "LiDAR-diepte wordt voorbereid; richt op een wand met structuur…"
-                return
-            }
-            guard timestamp - self.lastSavedTimestamp >= self.captureProfile.frameInterval else { return }
-            self.lastSavedTimestamp = timestamp; self.sequence += 1
-            let orientation = self.sceneView.window?.windowScene?.interfaceOrientation ?? .portrait
-            let viewport = self.sceneView.bounds.size
-            self.quality = self.fusion.integrate(frame: frame, sampleStride: self.captureProfile.sampleStride, captureTarget: self.captureTarget, objectVolume: self.objectScanVolume)
-            if self.captureTarget == .object,
-               timestamp - self.lastPreviewMeshTimestamp >= 0.8 {
-                self.lastPreviewMeshTimestamp = timestamp
-                let nextPass = self.liveMeshPasses + 1
-                if let patch = self.progressiveMesh.appendMeasuredPatch(
-                    from: frame,
-                    captureTarget: self.captureTarget,
-                    profile: self.captureProfile,
-                    pass: nextPass,
-                    objectVolume: self.objectScanVolume
-                ) {
-                    self.liveMeshPasses = patch.pass
-                    self.liveMeshTriangles = patch.triangles
-                }
-            }
-            self.store.append(frame: frame, sequence: self.sequence) { result in
-                Task { @MainActor [weak self] in
-                    if case .failure(let error) = result {
-                        self?.state = .failed("Opslaan mislukt: \(error.localizedDescription)")
-                        self?.statusLine = "Opslaan mislukt: \(error.localizedDescription)"
-                    }
-                }
-            }
-            if timestamp - self.lastHeatmapTimestamp > 0.5 {
-                self.lastHeatmapTimestamp = timestamp
-                self.projectedCells = self.fusion.projectedCells(camera: frame.camera, viewport: viewport, orientation: orientation)
-                self.statusLine = self.quality.advice.rawValue
-                try? self.store.checkpoint(roomPlanFile: self.roomPlanAvailable ? "room/room.usdz" : nil)
-            }
+            guard let self, self.state == .framing || self.state == .preparing || self.state == .recording else { return }
+            self.baseOverlay.update(meshes); self.baseFaces = self.baseOverlay.faceCount
         }
     }
-
+    nonisolated func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
+        let ids = anchors.map(\.identifier)
+        Task { @MainActor [weak self] in
+            self?.baseOverlay.remove(ids); self?.baseFaces = self?.baseOverlay.faceCount ?? 0
+        }
+    }
+    nonisolated func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        guard gate.take() else { return }
+        Task { @MainActor [weak self, gate] in
+            guard let self else { gate.release(); return }; self.receive(frame)
+        }
+    }
     nonisolated func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
         Task { @MainActor [weak self] in
             guard let self, self.state == .recording || self.state == .framing else { return }
+            if case .normal = camera.trackingState {
+                self.trackingReady = true; self.readyFrames = 0
+                self.statusLine = self.state == .framing ? "Teken een cirkel op de vloer" : "Tracking hersteld; houd het gebied even in beeld"
+                return
+            }
+            self.trackingReady = false; self.readyFrames = 0; self.surfaceOverlay.hide(); self.pipeline.resetStability()
             switch camera.trackingState {
-            case .normal:
-                // The former implementation left the last limited-state text on
-                // screen forever, even after ARKit had recovered and fusion was
-                // running again.
-                if self.state == .recording {
-                    self.statusLine = "Tracking stabiel. Metingen worden vastgelegd."
-                }
-            case .limited(.initializing):
-                self.statusLine = "LiDAR wordt kort gestabiliseerd; houd de iPad rustig."
-            case .limited(.excessiveMotion):
-                self.statusLine = "Beweeg langzamer; opname wacht tot tracking weer stabiel is."
-            case .limited(.insufficientFeatures):
-                self.statusLine = "Richt kort op een rand, vloertextuur of ander herkenbaar detail."
-            case .limited(.relocalizing):
-                self.statusLine = "Tracking herstelt. Houd de iPad bij het scanvolume en wacht even."
-            case .notAvailable:
-                self.state = .failed("AR-tracking is niet beschikbaar op dit apparaat.")
-            @unknown default:
-                self.statusLine = "Trackingstatus wijzigt; opname wacht op een stabiele positie."
+            case .limited(.initializing): self.statusLine = "Houd de iPad rustig terwijl tracking start"
+            case .limited(.excessiveMotion): self.statusLine = "Beweeg langzamer; de opname wacht even"
+            case .limited(.insufficientFeatures): self.statusLine = "Richt kort op een rand of herkenbare structuur"
+            case .limited(.relocalizing): self.statusLine = "Tracking herstelt; houd de iPad bij je scan"
+            case .notAvailable: self.statusLine = "Tracking tijdelijk niet beschikbaar"
+            default: self.statusLine = "Wacht op stabiele tracking"
             }
         }
     }
-
-    private func groundPoint(at point: CGPoint) -> SIMD3<Float>? {
-        let targets: [ARRaycastQuery.Target] = [.existingPlaneGeometry, .estimatedPlane]
-        for target in targets {
-            guard let query = sceneView.raycastQuery(from: point, allowing: target, alignment: .horizontal),
-                  let result = sceneView.session.raycast(query).first else { continue }
-            let transform = result.worldTransform
-            return SIMD3(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
+    nonisolated func sessionWasInterrupted(_ session: ARSession) {
+        Task { @MainActor [weak self] in
+            if self?.state == .recording { self?.pauseOrResume() }
         }
-        return nil
+    }
+    nonisolated func session(_ session: ARSession, didFailWithError error: Error) {
+        Task { @MainActor [weak self] in self?.fail(error) }
     }
 }
 
 extension CaptureController: RoomCaptureSessionDelegate {
-    nonisolated func captureSession(_ session: RoomCaptureSession, didProvide instruction: RoomCaptureSession.Instruction) {
-        Task { @MainActor [weak self] in
-            guard let self, self.state == .recording else { return }
-            guard self.captureTarget == .room else { return }
-            switch instruction {
-            case .moveCloseToWall: self.statusLine = "Ga 20–40 cm dichterbij voor meer detail."
-            case .moveAwayFromWall: self.statusLine = "Ga iets naar achteren zodat het oppervlak volledig zichtbaar is."
-            case .slowDown: self.statusLine = "Beweeg rustiger voor stabiele diepte en scherpe texturen."
-            case .turnOnLight: self.statusLine = "Meer licht helpt de RGB-texturen en tracking."
-            case .lowTexture: self.statusLine = "Richt op een hoek, rand of object met meer visueel detail."
-            case .normal: break
-            @unknown default: break
-            }
-        }
-    }
-
     nonisolated func captureSession(_ session: RoomCaptureSession, didEndWith data: CapturedRoomData, error: Error?) {
         Task { @MainActor [weak self] in
-            guard let self, self.state == .finishing else { return }
-            if let error { self.statusLine = "RoomPlan niet beschikbaar: \(error.localizedDescription)"; self.finalize(room: nil); return }
+            guard let self, self.roomSession === session, self.state == .finishing, !self.finishStarted else { return }
+            let token = self.generation
+            if let error { self.roomNotice = "RoomPlan: \(error.localizedDescription)"; self.finalize(room: nil); return }
             do {
                 let room = try await RoomBuilder(options: [.beautifyObjects]).capturedRoom(from: data)
-                self.finalize(room: room)
+                guard self.generation == token else { return }; self.finalize(room: room)
             } catch {
-                self.statusLine = "RoomPlan-resultaat kon niet worden opgebouwd; ruwe scan blijft behouden."
+                self.roomNotice = "RoomPlan kon niet afronden; de LiDAR-scan blijft behouden."
                 self.finalize(room: nil)
             }
         }

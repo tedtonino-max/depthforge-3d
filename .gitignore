@@ -5,3 +5,5 @@ build/
 xcuserdata/
 DepthForge3D.xcodeproj/
 __pycache__/
+.build/
+.swiftpm/

@@ -44,7 +44,7 @@ final class ObjectScanVolumeOverlay {
         topRing.position.y = volume.height
         root.addChildNode(topRing)
 
-        let r = volume.radius
+        let r = volume.radius / sqrt(2)
         for (x, z) in [(r, r), (r, -r), (-r, r), (-r, -r)] {
             let post = SCNCylinder(radius: 0.003, height: CGFloat(volume.height))
             post.firstMaterial = translucentMaterial(color: color, opacity: 0.24)
