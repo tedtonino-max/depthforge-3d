@@ -19,6 +19,7 @@ struct CaptureScreen: View {
             }
             VStack {
                 topBar
+                if isScanning { meshNotice }
                 Spacer()
                 if isScanning, !scanner.projectedCells.isEmpty { liveMap }
                 bottomPanel
@@ -101,6 +102,14 @@ struct CaptureScreen: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
         .frame(maxWidth: .infinity, alignment: .trailing)
         .padding(.horizontal)
+    }
+
+    private var meshNotice: some View {
+        Label("LIVE MESH · turquoise lijnen zijn gemeten LiDAR-oppervlak", systemImage: "triangle.inset.filled")
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(.black.opacity(0.62), in: Capsule())
+            .padding(.top, 8)
     }
 
     @ViewBuilder private var bottomPanel: some View {

@@ -28,10 +28,12 @@ final class CaptureController: NSObject, ObservableObject {
     private var sequence = 0
     private var completedRoom: CapturedRoom?
     private let accelerator = MetalFusionAccelerator()
+    private let liveMeshOverlay = LiveMeshOverlay()
 
     override init() {
         super.init()
         sceneView.session.delegate = self
+        sceneView.delegate = liveMeshOverlay
         sceneView.automaticallyUpdatesLighting = true
         metalEnabled = accelerator.isAvailable
     }
