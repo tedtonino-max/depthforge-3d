@@ -15,13 +15,19 @@ final class GeometryFusion {
 
     func integrate(frame: ARFrame, sampleStride: Int = 4) -> QualitySummary {
         guard let depthData = frame.sceneDepth else { return summary() }
-        guard let confidence = depthData.confidenceMap else { return summary() }
+        let confidence = depthData.confidenceMap
         let depth = depthData.depthMap
-        CVPixelBufferLockBaseAddress(depth, .readOnly); CVPixelBufferLockBaseAddress(confidence, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(depth, .readOnly); CVPixelBufferUnlockBaseAddress(confidence, .readOnly) }
-        guard let depthBase = CVPixelBufferGetBaseAddress(depth), let confidenceBase = CVPixelBufferGetBaseAddress(confidence) else { return summary() }
+        CVPixelBufferLockBaseAddress(depth, .readOnly)
+        if let confidence { CVPixelBufferLockBaseAddress(confidence, .readOnly) }
+        defer {
+            CVPixelBufferUnlockBaseAddress(depth, .readOnly)
+            if let confidence { CVPixelBufferUnlockBaseAddress(confidence, .readOnly) }
+        }
+        guard let depthBase = CVPixelBufferGetBaseAddress(depth) else { return summary() }
+        let confidenceBase = confidence.flatMap(CVPixelBufferGetBaseAddress)
         let depthWidth = CVPixelBufferGetWidth(depth), depthHeight = CVPixelBufferGetHeight(depth)
-        let depthRow = CVPixelBufferGetBytesPerRow(depth), confidenceRow = CVPixelBufferGetBytesPerRow(confidence)
+        let depthRow = CVPixelBufferGetBytesPerRow(depth)
+        let confidenceRow = confidence.map(CVPixelBufferGetBytesPerRow)
         let imageSize = frame.camera.imageResolution
         var intrinsics = frame.camera.intrinsics
         intrinsics.columns.0.x *= Float(depthWidth) / Float(imageSize.width)
@@ -33,9 +39,9 @@ final class GeometryFusion {
 
         let isFloat16 = CVPixelBufferGetPixelFormatType(depth) == kCVPixelFormatType_DepthFloat16
         for y in Swift.stride(from: 0, to: depthHeight, by: sampleStride) {
-            let confidenceLine = confidenceBase.advanced(by: y * confidenceRow).assumingMemoryBound(to: UInt8.self)
+            let confidenceLine = confidenceBase.map { $0.advanced(by: y * (confidenceRow ?? 0)).assumingMemoryBound(to: UInt8.self) }
             for x in Swift.stride(from: 0, to: depthWidth, by: sampleStride) {
-                guard confidenceLine[x] >= 1 else { continue }
+                if let confidenceLine, confidenceLine[x] < 1 { continue }
                 let distance: Float
                 if isFloat16 {
                     let line = depthBase.advanced(by: y * depthRow).assumingMemoryBound(to: Float16.self)

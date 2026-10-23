@@ -40,7 +40,7 @@ final class CaptureController: NSObject, ObservableObject {
         }
         do {
             scanRoot = try store.beginNewScan()
-            fusion.reset(); sequence = 0; completedRoom = nil
+            fusion.reset(); sequence = 0; completedRoom = nil; lastSavedTimestamp = 0; lastHeatmapTimestamp = 0
             let configuration = ARWorldTrackingConfiguration()
             configuration.frameSemantics = [.sceneDepth, .smoothedSceneDepth]
             if ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) { configuration.sceneReconstruction = .meshWithClassification }
@@ -110,7 +110,10 @@ extension CaptureController: ARSessionDelegate {
             self.quality = self.fusion.integrate(frame: frame)
             self.store.append(frame: frame, sequence: self.sequence) { result in
                 Task { @MainActor [weak self] in
-                    if case .failure(let error) = result { self?.statusLine = "Frame niet opgeslagen: \(error.localizedDescription)" }
+                    if case .failure(let error) = result {
+                        self?.state = .failed("Opslaan mislukt: \(error.localizedDescription)")
+                        self?.statusLine = "Opslaan gestopt; er is geen scan verloren zonder melding. Start opnieuw nadat de fout is opgelost."
+                    }
                 }
             }
             if timestamp - self.lastHeatmapTimestamp > 0.5 {

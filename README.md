@@ -37,14 +37,14 @@ de app bouwen maar levert geen ARKit-scenediepte.
 
 ## Opnameformaat
 
-Elke opname staat in `Documents/DepthForgeScans/<id>/`:
+Elke opname staat lokaal in `Application Support/DepthForgeScans/<id>/` binnen de app-container:
 
 ```text
 manifest.json                 opname- en toestelinformatie
 frames/index.jsonl            pose, intrinsics, afmetingen en bestandsnamen
 frames/000001.depthraw        native ARKit sceneDepth bytes; pixel format and row stride in index
-frames/000001.confidence8     UInt8 (0 laag, 1 medium, 2 hoog)
-frames/000001.jpg             RGB-camerabeeld
+frames/000001.confidence8     UInt8 (0 laag, 1 medium, 2 hoog), indien ARKit die levert
+frames/000001.jpg             RGB-camerabeeld, indien JPEG-codering slaagt
 room/room.usdz                RoomPlan-export, indien RoomPlan voltooit
 exports/<id>.ply              gefuseerde point cloud
 ```

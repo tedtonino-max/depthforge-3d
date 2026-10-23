@@ -25,13 +25,14 @@ struct FrameRecord: Codable {
     let sequence: Int
     let timestamp: TimeInterval
     let depthFile: String
-    let confidenceFile: String
-    let imageFile: String
+    let confidenceFile: String?
+    /// JPEG is best effort: ARKit depth and pose must remain usable if the RGB encoder declines a frame.
+    let imageFile: String?
     let depthWidth: Int
     let depthHeight: Int
     let depthPixelFormat: UInt32
     let depthBytesPerRow: Int
-    let confidenceBytesPerRow: Int
+    let confidenceBytesPerRow: Int?
     let imageWidth: Int
     let imageHeight: Int
     let cameraTransform: [Float]

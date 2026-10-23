@@ -11,24 +11,27 @@ final class DepthProjectStore {
 
     func beginNewScan() throws -> URL {
         let id = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let destination = documents.appendingPathComponent("DepthForgeScans/\(id)", isDirectory: true)
+        let applicationSupport = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        let destination = applicationSupport.appendingPathComponent("DepthForgeScans/\(id)", isDirectory: true)
         for component in [destination, destination.appendingPathComponent("frames"), destination.appendingPathComponent("room"), destination.appendingPathComponent("exports")] {
             try FileManager.default.createDirectory(at: component, withIntermediateDirectories: true)
         }
+        let indexURL = destination.appendingPathComponent("frames/index.jsonl")
+        guard FileManager.default.createFile(atPath: indexURL.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: indexURL.path])
+        }
         root = destination; frameCount = 0
-        FileManager.default.createFile(atPath: destination.appendingPathComponent("frames/index.jsonl").path, contents: nil)
-        indexHandle = try FileHandle(forWritingTo: destination.appendingPathComponent("frames/index.jsonl"))
+        indexHandle = try FileHandle(forWritingTo: indexURL)
         try checkpoint(roomPlanFile: nil)
         return destination
     }
 
     func append(frame: ARFrame, sequence: Int, completion: @escaping (Result<Void, Error>) -> Void) {
         guard let root else { completion(.failure(CocoaError(.fileNoSuchFile))); return }
-        let depth = frame.sceneDepth
-        guard let depth, let confidence = depth.confidenceMap else { completion(.failure(CocoaError(.fileReadUnknown))); return }
+        guard let depth = frame.sceneDepth else { completion(.failure(CocoaError(.fileReadUnknown))); return }
+        let confidence = depth.confidenceMap
         let depthCopy = PixelBufferCopy.make(depth.depthMap)
-        let confidenceCopy = PixelBufferCopy.make(confidence)
+        let confidenceCopy = confidence.map(PixelBufferCopy.make)
         let jpeg = PixelBufferCopy.jpeg(frame.capturedImage)
         let transform = frame.camera.transform.codableColumnMajor
         let intrinsics = frame.camera.intrinsics.codableColumnMajor
@@ -39,12 +42,22 @@ final class DepthProjectStore {
             do {
                 let prefix = String(format: "%06d", sequence)
                 let frameDirectory = root.appendingPathComponent("frames")
-                let depthName = "frames/\(prefix).depthraw", confidenceName = "frames/\(prefix).confidence8", imageName = "frames/\(prefix).jpg"
+                let depthName = "frames/\(prefix).depthraw"
                 try depthCopy.write(to: root.appendingPathComponent(depthName), options: .atomic)
-                try confidenceCopy.write(to: root.appendingPathComponent(confidenceName), options: .atomic)
-                guard let jpeg else { throw CocoaError(.fileWriteUnknown) }
-                try jpeg.write(to: root.appendingPathComponent(imageName), options: .atomic)
-                let record = FrameRecord(sequence: sequence, timestamp: timestamp, depthFile: depthName, confidenceFile: confidenceName, imageFile: imageName, depthWidth: CVPixelBufferGetWidth(depth.depthMap), depthHeight: CVPixelBufferGetHeight(depth.depthMap), depthPixelFormat: CVPixelBufferGetPixelFormatType(depth.depthMap), depthBytesPerRow: CVPixelBufferGetBytesPerRow(depth.depthMap), confidenceBytesPerRow: CVPixelBufferGetBytesPerRow(confidence), imageWidth: CVPixelBufferGetWidth(frame.capturedImage), imageHeight: CVPixelBufferGetHeight(frame.capturedImage), cameraTransform: transform, intrinsics: intrinsics, tracking: tracking)
+                let confidenceName: String?
+                if let confidenceCopy {
+                    confidenceName = "frames/\(prefix).confidence8"
+                    try confidenceCopy.write(to: root.appendingPathComponent(confidenceName!), options: .atomic)
+                } else {
+                    confidenceName = nil
+                }
+                var imageName: String?
+                if let jpeg {
+                    let name = "frames/\(prefix).jpg"
+                    try jpeg.write(to: root.appendingPathComponent(name), options: .atomic)
+                    imageName = name
+                }
+                let record = FrameRecord(sequence: sequence, timestamp: timestamp, depthFile: depthName, confidenceFile: confidenceName, imageFile: imageName, depthWidth: CVPixelBufferGetWidth(depth.depthMap), depthHeight: CVPixelBufferGetHeight(depth.depthMap), depthPixelFormat: CVPixelBufferGetPixelFormatType(depth.depthMap), depthBytesPerRow: CVPixelBufferGetBytesPerRow(depth.depthMap), confidenceBytesPerRow: confidence.map(CVPixelBufferGetBytesPerRow), imageWidth: CVPixelBufferGetWidth(frame.capturedImage), imageHeight: CVPixelBufferGetHeight(frame.capturedImage), cameraTransform: transform, intrinsics: intrinsics, tracking: tracking)
                 let line = try self.encoder.encode(record) + Data([0x0A])
                 self.indexHandle?.write(line)
                 self.frameCount += 1
@@ -55,9 +68,11 @@ final class DepthProjectStore {
     }
 
     func checkpoint(roomPlanFile: String?) throws {
-        guard let root else { return }
-        let manifest = ScanManifest(createdAt: Date(), device: UIDevice.current.model, frames: frameCount, roomPlanFile: roomPlanFile)
-        try encoder.encode(manifest).write(to: root.appendingPathComponent("manifest.json"), options: .atomic)
+        try queue.sync {
+            guard let root else { return }
+            let manifest = ScanManifest(createdAt: Date(), device: UIDevice.current.model, frames: frameCount, roomPlanFile: roomPlanFile)
+            try encoder.encode(manifest).write(to: root.appendingPathComponent("manifest.json"), options: .atomic)
+        }
     }
 
     func close(roomPlanFile: String?) throws { try checkpoint(roomPlanFile: roomPlanFile); try indexHandle?.close(); indexHandle = nil }
