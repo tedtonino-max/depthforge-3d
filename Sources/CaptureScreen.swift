@@ -40,7 +40,7 @@ struct CaptureScreen: View {
                 HStack(alignment: .top) {
                     Menu {
                         Button("Scanhandleiding") { showGuide = true }
-                        Toggle("Toon bevestigd oppervlak", isOn: $scanner.showSurface)
+                        Toggle("Toon basismesh en detail", isOn: $scanner.showSurface)
                         Picker("Opname", selection: $scanner.captureProfile) {
                             ForEach(CaptureProfile.allCases) { Text($0.title).tag($0) }
                         }
@@ -58,7 +58,7 @@ struct CaptureScreen: View {
                     }.padding(12).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
                 }
                 if active {
-                    Text(scanner.quality.totalStable == 0 ? "Oppervlak wordt opgebouwd" : "Bevestigd oppervlak · \(scanner.quality.totalStable) elementen")
+                    Text("1  Basis · \(scanner.baseFaces) vlakken    →    2  Detail · \(scanner.meshFaces) vlakken")
                         .font(.caption2).padding(.horizontal, 12).padding(.vertical, 6)
                         .background(.black.opacity(0.55), in: Capsule())
                 }
@@ -114,12 +114,12 @@ struct CaptureScreen: View {
                         Button("Wissen", action: scanner.clearPaint).buttonStyle(.bordered)
                         Slider(value: $scanner.brushRadius, in: 0.04...0.20).frame(maxWidth: 130).accessibilityLabel("Kwastgrootte")
                         Spacer()
-                        Button("Start scan", action: scanner.confirmDetail)
+                        Button("Verfijn selectie", action: scanner.confirmDetail)
                             .buttonStyle(.borderedProminent).disabled(scanner.pendingZone == nil)
                     }
                 } else {
                     if scanner.detailZone != nil {
-                        Text("Geschilderd gebied · \(scanner.quality.stable) bevestigde metingen in beeld").font(.caption)
+                        Text("Oranje = selectie · mint = gemeten detail · \(scanner.quality.stable) bevestigde metingen in beeld").font(.caption)
                     }
                     if let notice = scanner.resourceNotice {
                         Text(notice).font(.caption).foregroundStyle(.orange)
@@ -146,10 +146,10 @@ struct CaptureScreen: View {
         case .review:
             panel {
                 Text("Controleer je scan").font(.headline)
-                Text("De meetlijnen tonen alleen herhaald bevestigde oppervlakken. Open plekken zijn nog niet betrouwbaar gemeten. Bekijk ook de onderkant en dunne delen voordat je opslaat.")
+                Text("Blauw is de basismesh. Mint is het extra gemeten detail. Oranje markeert je selectie. Open plekken zijn nog niet gereconstrueerd; controleer vooral pootjes en onderkanten.")
                     .font(.subheadline).foregroundStyle(.secondary)
                 Text(scanner.quality.advice.rawValue).font(.caption.weight(.semibold))
-                Toggle("Toon bevestigd oppervlak", isOn: $scanner.showSurface)
+                Toggle("Toon basismesh en detail", isOn: $scanner.showSurface)
                 HStack {
                     Button("Verder scannen", action: scanner.pauseOrResume).buttonStyle(.bordered)
                     Spacer()
@@ -159,11 +159,11 @@ struct CaptureScreen: View {
         case .finished:
             panel {
                 Label("Scan opgeslagen", systemImage: "checkmark.circle.fill").font(.headline).foregroundStyle(.mint)
-                Text("\(scanner.savedFrames) ruwe frames en \(scanner.photos.count) geselecteerde fotomomenten zijn lokaal bewaard. PLY bevat het bevestigde oppervlak met kleur en normaalrichting.")
+                Text("\(scanner.savedFrames) ruwe frames en \(scanner.photos.count) geselecteerde fotomomenten zijn lokaal bewaard. De scanmap bevat de basismesh, detailmesh en gekleurde meetpunten als aparte PLY-bestanden.")
                     .font(.subheadline).foregroundStyle(.secondary)
                 if let notice = scanner.roomNotice { Text(notice).font(.caption).foregroundStyle(.orange) }
                 HStack {
-                    Button("Deel PLY", action: scanner.exportAndShare).buttonStyle(.borderedProminent)
+                    Button("Deel basismesh", action: scanner.exportAndShare).buttonStyle(.borderedProminent)
                     Button("Bewaar scanmap") { exportFolder = true }.buttonStyle(.bordered)
                     Button("Nieuwe scan", action: scanner.returnToStart).buttonStyle(.bordered)
                 }
@@ -248,10 +248,10 @@ struct CaptureScreen: View {
                     Text("Blijf rustig kijken tot het oppervlak verschijnt. Beweeg daarna zijwaarts voor een tweede hoek, ook laag bij pootjes en randen.")
                 }
                 Section("Detailzone") {
-                    Text("Tik een oppervlak aan en bevestig de ring. De app verwerkt daar meer dieptepunten en vraagt om meerdere kijkhoeken.")
+                    Text("Schilder met je vinger op de zichtbare basis. Oranje blijft je selectie tonen. Kies Verfijn selectie en bekijk het detail vanuit meerdere hoeken.")
                 }
                 Section("Betrouwbare geometrie") {
-                    Text("Mint toont één gefuseerd oppervlak. Meerdere frames verfijnen dezelfde elementen. Onzekere of niet-gemeten delen blijven open.")
+                    Text("Blauw toont de blijvende basismesh, mint de extra bevestigde detailvlakken. De basis blijft zichtbaar tijdens het verfijnen.")
                     Text("De feedback geldt voor de zichtbare gekozen zone; zij bewijst niet dat de achterkant of onderkant volledig is gescand.")
                 }
                 Section("Foto's en export") {

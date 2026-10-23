@@ -67,3 +67,12 @@ requires assessment of both device scans. No sub-millimetre or texture-atlas cla
 - Apple sceneDepth input and confidence: https://developer.apple.com/documentation/arkit/displaying-a-point-cloud-using-scene-depth
 - Camera exposure duration: https://developer.apple.com/documentation/arkit/arcamera/exposureduration
 - Native folder export: https://developer.apple.com/documentation/uikit/uidocumentpickerviewcontroller/init(forexporting:ascopy:)
+
+
+## Base-first mesh revision (0.3.0 / 27)
+
+The supplied real scan contained 405 frames but only 119 exported points at 5–20 cm above its selected floor. Its photos and depth files remain local and are not included in this repository. A local depth analysis found repeated valid observations of the legs. This exposed incomplete reconstruction; it does not prove which single filter caused all losses.
+
+This revision enables ARKit's persistent base mesh, retains confirmed detail connectivity in world coordinates, exports base and detail triangle meshes separately, preserves conspicuous orange paint, and requires a complete 5x5 confident empty-space footprint before carving a surfel. Detail sampling no longer drops narrow structures through adaptive stride. New regression tests exercise edge carving, off-screen mesh retention, and clipped face export.
+
+Physical iPad validation is still required. A green build and synthetic tests do not establish recovery of every leg in the real scan, alignment on-device, or acceptable sustained performance.

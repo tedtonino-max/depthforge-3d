@@ -103,6 +103,19 @@ struct DepthInput {
         i >= 0 && i < depths.count && confidence[i] == 2 &&
         depths[i].isFinite && depths[i] > 0.12 && depths[i] < 5
     }
+    func contradicts(_ p: Vec3) -> Bool {
+        let local = pose.local(p)
+        guard let (x, y) = camera.pixel(local), x >= 2, y >= 2,
+              x < camera.width - 2, y < camera.height - 2 else { return false }
+        let predicted = -local.z, margin = max(0.04, predicted * 0.025)
+        // Require a complete 5x5 footprint of high-confidence free space.
+        // A narrow leg may shift by a depth pixel with pose/measurement noise.
+        for dy in -2...2 { for dx in -2...2 {
+            let i = (y + dy) * camera.width + x + dx
+            if !valid(i) || depths[i] - predicted <= margin { return false }
+        } }
+        return true
+    }
     func visible(_ p: Vec3, tolerance: Float = 0.025) -> Bool {
         let local = pose.local(p)
         guard let (x, y) = camera.pixel(local) else { return false }
@@ -169,4 +182,5 @@ struct SurfaceUpdate {
     var elapsed: Double
     var camera: DepthCamera? = nil
     var triangles: [Int32] = []
+    var mesh = TriangleMesh()
 }

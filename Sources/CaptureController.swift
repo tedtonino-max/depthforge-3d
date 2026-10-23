@@ -24,12 +24,14 @@ final class CaptureController: NSObject, ObservableObject {
     @Published var selectedAreaOnly = false
     @Published var brushRadius: Float = 0.08
     @Published private(set) var meshFaces = 0
+    @Published private(set) var baseFaces = 0
     private var lastBrushTime = -Double.infinity
     @Published var captureTarget: CaptureTarget = .object
     @Published var showShareSheet = false
     @Published private(set) var shareURL: URL?
     @Published var showSurface = true {
         didSet {
+            baseOverlay.setVisible(showSurface)
             if !showSurface { surfaceOverlay.hide() }
             else if let lastUpdate, let lastPose, trackingReady {
                 surfaceOverlay.show(lastUpdate, pose: lastPose, volume: objectScanVolume)
@@ -41,6 +43,7 @@ final class CaptureController: NSObject, ObservableObject {
     let sceneView = ARSCNView(frame: .zero)
     private let pipeline = CapturePipeline()
     nonisolated private let gate = FrameGate()
+    private let baseOverlay = BaseMeshOverlay()
     private let surfaceOverlay = FusedSurfaceOverlay()
     private let volumeOverlay = ObjectScanVolumeOverlay()
     private let zoneOverlay = DetailZoneOverlay()
@@ -61,6 +64,7 @@ final class CaptureController: NSObject, ObservableObject {
         super.init()
         sceneView.session.delegate = self
         sceneView.automaticallyUpdatesLighting = false
+        baseOverlay.attach(to: sceneView.scene.rootNode)
         surfaceOverlay.attach(to: sceneView.scene.rootNode)
         volumeOverlay.attach(to: sceneView.scene.rootNode)
         zoneOverlay.attach(to: sceneView.scene.rootNode)
@@ -75,10 +79,12 @@ final class CaptureController: NSObject, ObservableObject {
         photos = []; savedFrames = 0; meshFaces = 0; quality = SurfaceQuality(); roomNotice = nil
         resourceNotice = nil; objectScanVolume = nil; detailZone = nil; pendingZone = nil
         choosingDetail = false; shareURL = nil; scanRoot = nil; readyFrames = 0
+        baseOverlay.clear(); baseFaces = 0
         surfaceOverlay.clear(); volumeOverlay.reset(); zoneOverlay.clear()
         lastSaved = 0; skipped = 0; lastUpdate = nil; lastPose = nil
         let configuration = ARWorldTrackingConfiguration()
         configuration.frameSemantics = [.sceneDepth]
+        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) { configuration.sceneReconstruction = .mesh }
         configuration.planeDetection = [.horizontal, .vertical]
         sceneView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
         if captureTarget == .object {
@@ -150,7 +156,8 @@ final class CaptureController: NSObject, ObservableObject {
 
     func chooseDetail() {
         guard state == .recording else { return }
-        choosingDetail = true; pendingZone = nil; readyFrames = 0
+        guard baseFaces > 0 else { statusLine = "Breng eerst de basisvorm in beeld"; return }
+        choosingDetail = true; pendingZone = nil; readyFrames = 0; surfaceOverlay.hide()
         statusLine = "Schilder met je vinger over het gewenste gebied"
     }
     func selectDetail(at point: CGPoint) {
@@ -235,7 +242,7 @@ final class CaptureController: NSObject, ObservableObject {
             } catch { roomNotice = "RoomPlan-export mislukt; LiDAR en foto's worden wel bewaard." }
         }
         let token = generation
-        pipeline.finish(roomFile: roomFile, skipped: skipped) { [weak self] result in
+        pipeline.finish(roomFile: roomFile, skipped: skipped, baseMesh: baseOverlay.snapshot()) { [weak self] result in
             Task { @MainActor in
                 guard let self, self.generation == token else { return }
                 switch result {
@@ -250,6 +257,7 @@ final class CaptureController: NSObject, ObservableObject {
         guard state == .finished || state == .framing || state == .idle || isFailed else { return }
         generation = UUID(); finalizeTask?.cancel()
         roomSession?.stop(pauseARSession: true); roomSession = nil; sceneView.session.pause()
+        baseOverlay.clear(); baseFaces = 0
         surfaceOverlay.clear(); volumeOverlay.reset(); zoneOverlay.clear(); state = .idle
     }
     private var isFailed: Bool { if case .failed = state { return true }; return false }
@@ -263,9 +271,11 @@ final class CaptureController: NSObject, ObservableObject {
     }
     private func ensureDepthConfiguration() {
         guard let current = sceneView.session.configuration as? ARWorldTrackingConfiguration,
-              !current.frameSemantics.contains(.sceneDepth),
               let updated = current.copy() as? ARWorldTrackingConfiguration else { return }
+        let meshSupported = ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
+        guard !current.frameSemantics.contains(.sceneDepth) || (meshSupported && current.sceneReconstruction == .none) else { return }
         updated.frameSemantics.insert(.sceneDepth)
+        if meshSupported { updated.sceneReconstruction = .mesh }
         sceneView.session.run(updated)
     }
     private func raycast(_ point: CGPoint, alignment: ARRaycastQuery.TargetAlignment) -> ARRaycastResult? {
@@ -324,9 +334,9 @@ final class CaptureController: NSObject, ObservableObject {
                            ? "Lager opnametempo om camera en opslag soepel te houden" : nil)
                     guard selectedZone == self.detailZone?.id else { return }
                     self.quality = output.surface.quality
-                    self.meshFaces = output.surface.triangles.count / 3
+                    self.meshFaces = output.surface.mesh.faces.count / 3
                     self.lastUpdate = output.surface; self.lastPose = output.pose
-                    if self.showSurface, self.trackingReady, self.state == .recording {
+                    if self.showSurface, self.detailZone != nil, self.trackingReady, self.state == .recording {
                         self.surfaceOverlay.show(output.surface, pose: output.pose, volume: self.objectScanVolume)
                         if let current = self.sceneView.session.currentFrame {
                             self.surfaceOverlay.refreshVisibility(current)
@@ -335,8 +345,12 @@ final class CaptureController: NSObject, ObservableObject {
                     guard self.state == .recording, self.trackingReady, !self.choosingDetail else { return }
 
                     self.readyFrames = self.quality.advice == .ready ? self.readyFrames + 1 : 0
-                    self.statusLine = self.quality.advice == .ready && self.readyFrames < 3
-                        ? ScanAdvice.holdSteady.rawValue : self.quality.advice.rawValue
+                    if self.detailZone == nil {
+                        self.statusLine = self.baseFaces == 0 ? "1 · Richt op vloer en object: basis wordt opgebouwd" : "1 · Basismesh zichtbaar — schilder een detail om te verfijnen"
+                    } else {
+                        self.statusLine = self.quality.advice == .ready && self.readyFrames < 3
+                            ? ScanAdvice.holdSteady.rawValue : self.quality.advice.rawValue
+                    }
                 case .failure(let error):
                     if error is CaptureError { self.statusLine = error.localizedDescription }
                     else { self.fail(error) }
@@ -347,6 +361,22 @@ final class CaptureController: NSObject, ObservableObject {
 }
 
 extension CaptureController: ARSessionDelegate {
+    nonisolated func session(_ session: ARSession, didAdd anchors: [ARAnchor]) { updateBase(anchors) }
+    nonisolated func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) { updateBase(anchors) }
+    nonisolated private func updateBase(_ anchors: [ARAnchor]) {
+        let meshes = anchors.compactMap { $0 as? ARMeshAnchor }
+        guard !meshes.isEmpty else { return }
+        Task { @MainActor [weak self] in
+            guard let self, self.state == .framing || self.state == .preparing || self.state == .recording else { return }
+            self.baseOverlay.update(meshes); self.baseFaces = self.baseOverlay.faceCount
+        }
+    }
+    nonisolated func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
+        let ids = anchors.map(\.identifier)
+        Task { @MainActor [weak self] in
+            self?.baseOverlay.remove(ids); self?.baseFaces = self?.baseOverlay.faceCount ?? 0
+        }
+    }
     nonisolated func session(_ session: ARSession, didUpdate frame: ARFrame) {
         guard gate.take() else { return }
         Task { @MainActor [weak self, gate] in

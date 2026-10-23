@@ -5,6 +5,7 @@ import Foundation
 /// Only the worker queue may access this state.
 final class SurfelFusion {
     private(set) var surfels: [Int: Surfel] = [:]
+    let detailMesh = PersistentDetailMesh()
     private var nextID = 0
     private var frameNumber = 0
     private var lastTimestamp = -Double.infinity
@@ -15,7 +16,7 @@ final class SurfelFusion {
     }
     func reset() {
         surfels.removeAll(keepingCapacity: true)
-        nextID = 0; frameNumber = 0; lastTimestamp = -.infinity
+        nextID = 0; frameNumber = 0; lastTimestamp = -.infinity; detailMesh.reset()
     }
 
     func integrate(_ input: DepthInput) -> SurfaceUpdate {
@@ -62,12 +63,13 @@ final class SurfelFusion {
             let local = input.pose.local(s.position)
             guard let (x, y) = camera.pixel(local) else { continue }
             let i = y * camera.width + x, predicted = -local.z
-            if input.valid(i), input.depths[i] - predicted > max(0.04, predicted * 0.025),
+            if input.contradicts(s.position),
                dot(s.normal, unit(input.pose.position - s.position)) > 0.2 {
                 s.contradictions += 1
                 if s.contradictions >= 4 { removals.append(id); continue }
                 surfels[id] = s
             }
+            else if s.contradictions > 0 { s.contradictions = 0; surfels[id] = s }
             if predicted < zBuffer[i] { projected[i] = id; zBuffer[i] = predicted }
         }
         for id in removals { surfels.removeValue(forKey: id) }
@@ -189,11 +191,15 @@ final class SurfelFusion {
                   dot(s.normal, unit(input.pose.position - s.position)) > 0.15 else { return false }
             return input.visible(s.position)
         }.sorted()
+        let complete = ids.compactMap { surfels[$0] }
+        let completeTriangles = SurfaceMesher.triangles(complete, camera: camera, pose: input.pose)
+        detailMesh.update(visible: complete, triangles: completeTriangles, all: surfels)
         let step = max(1, Int(ceil(Double(ids.count) / Double(max(1, renderLimit)))))
         let visible = Swift.stride(from: 0, to: ids.count, by: step).compactMap { surfels[ids[$0]] }
         let triangles = SurfaceMesher.triangles(visible, camera: camera, pose: input.pose)
         return SurfaceUpdate(quality: quality, visibleSurfels: visible,
-                             elapsed: Date.timeIntervalSinceReferenceDate - start, camera: camera, triangles: triangles)
+                             elapsed: Date.timeIntervalSinceReferenceDate - start, camera: camera, triangles: triangles,
+                             mesh: detailMesh.snapshot(surfels, selection: input.detailZone))
     }
 
     private func measuredNormal(_ input: DepthInput, x: Int, y: Int) -> Vec3? {

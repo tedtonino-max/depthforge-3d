@@ -149,7 +149,11 @@ final class SurfaceTests: XCTestCase {
         XCTAssertGreaterThan(Set(fusion.surfels.keys).intersection(original).count, original.count / 2)
         // A farther high-confidence surface is evidence the nearer one is gone.
         for i in 17...32 { _ = fusion.integrate(plane(time: Double(i), z: -2)) }
-        XCTAssertLessThan(fusion.surfels.values.filter { $0.isStable && $0.position.z > -1.5 }.count, 10)
+        XCTAssertLessThan(fusion.surfels.values.filter {
+            guard $0.isStable && $0.position.z > -1.5,
+                  let (x, y) = camera.pixel($0.position) else { return false }
+            return x >= 3 && y >= 3 && x < camera.width - 3 && y < camera.height - 3
+        }.count, 10)
     }
 
     func testDetailDiskHasSurfaceOrientationAndIncreasesRoomSampling() {
@@ -233,4 +237,41 @@ final class SurfaceTests: XCTestCase {
         _ = fusion.integrate(frame)
         XCTAssertTrue(fusion.surfels.isEmpty)
     }
+    func testThinEdgeIsNotCarvedByAdjacentBackgroundPixel() {
+        var frame = plane(time: 1, z: -2)
+        let p = camera.unproject(x: 32, y: 24, depth: 1)
+        XCTAssertTrue(frame.contradicts(p))
+        frame.depths[24 * camera.width + 33] = 1
+        XCTAssertFalse(frame.contradicts(p), "One-pixel pose/depth shift must not delete a thin leg")
+        frame.depths[24 * camera.width + 33] = 2
+        frame.confidence[24 * camera.width + 33] = 1
+        XCTAssertFalse(frame.contradicts(p), "Uncertain depth cannot carve a surface")
+    }
+
+    func testPersistentFacesSurviveCameraTurningAwayAndExportAsFaces() {
+        let fusion = SurfelFusion()
+        for i in 1...12 { _ = fusion.integrate(plane(time: Double(i))) }
+        let before = fusion.detailMesh.snapshot(fusion.surfels)
+        XCTAssertGreaterThan(before.faces.count, 30)
+        var pose = CameraPose(); pose.position.x = 10
+        _ = fusion.integrate(plane(time: 13, pose: pose))
+        let after = fusion.detailMesh.snapshot(fusion.surfels)
+        XCTAssertGreaterThanOrEqual(after.faces.count, before.faces.count)
+        let text = String(decoding: after.plyData(), as: UTF8.self)
+        XCTAssertTrue(text.contains("element face \(after.faces.count / 3)"))
+        let rows = text.components(separatedBy: "end_header\n")[1].split(separator: "\n")
+        XCTAssertEqual(rows.count, after.vertices.count + after.faces.count / 3)
+        XCTAssertTrue(after.faces.allSatisfy { $0 >= 0 && $0 < after.vertices.count })
+    }
+
+    func testMeshExportClipsFacesAndReindexesVertices() {
+        let mesh = TriangleMesh(vertices: [Vec3(0,0,-1), Vec3(0.01,0,-1), Vec3(0,0.01,-1), Vec3(2,0,-1)], faces: [0,1,2,1,2,3])
+        let volume = ObjectScanVolume(center: Vec3(0,-0.1,-1), radius: 0.2, height: 0.3)
+        let result = mesh.clipped(volume: volume, selection: nil)
+        XCTAssertEqual(result.vertices.count, 3)
+        XCTAssertEqual(result.faces, [0,1,2])
+        var combined = result; combined.append(result)
+        XCTAssertEqual(combined.faces, [0,1,2,3,4,5])
+    }
+
 }

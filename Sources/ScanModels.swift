@@ -52,7 +52,10 @@ struct FrameRecord: Codable {
 }
 
 struct ScanManifest: Codable {
-    let schema = "depthforge/2"
+    let schema = "depthforge/3"
+    let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
+    let appBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
+    let meshFiles = ["exports/base-mesh.ply", "exports/detail-mesh.ply"]
     let createdAt: Date
     let device: String
     let depthFormat = "Native sceneDepth CVPixelBuffer bytes; per-frame pixel format and row stride are recorded"

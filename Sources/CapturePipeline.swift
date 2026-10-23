@@ -45,7 +45,7 @@ final class CapturePipeline {
             autoreleasepool {
                 let start = Date.timeIntervalSinceReferenceDate
                 guard var input = self.fusion.input(frame: frame, target: target, volume: self.volume,
-                    zone: zone, stride: stride, detailStride: self.detailStride, budget: 0.09) else {
+                    zone: zone, stride: stride, detailStride: 1, budget: 0.12) else {
                     completion(.failure(CaptureError.noDepth)); return
                 }
                 input.selectionOnly = selectionOnly
@@ -95,14 +95,20 @@ final class CapturePipeline {
         }
     }
 
-    func finish(roomFile: String?, skipped: Int, completion: @escaping (Result<URL, Error>) -> Void) {
+    func finish(roomFile: String?, skipped: Int, baseMesh: TriangleMesh, completion: @escaping (Result<URL, Error>) -> Void) {
         queue.async {
             do {
                 guard let root = self.store.root else { throw CocoaError(.fileNoSuchFile) }
                 let url = root.appendingPathComponent("exports/fused-surface.ply")
                 try self.fusion.surface.plyData(volume: self.volume, selection: self.selectedBoundary).write(to: url, options: .atomic)
+                let base = baseMesh.clipped(volume: self.volume, selection: self.selectedBoundary)
+                let detail = self.fusion.surface.detailMesh.snapshot(self.fusion.surface.surfels)
+                    .clipped(volume: self.volume, selection: self.selectedBoundary)
+                let baseURL = root.appendingPathComponent("exports/base-mesh.ply")
+                try base.plyData().write(to: baseURL, options: .atomic)
+                try detail.plyData().write(to: root.appendingPathComponent("exports/detail-mesh.ply"), options: .atomic)
                 try self.store.close(roomPlanFile: roomFile, skipped: skipped)
-                completion(.success(url))
+                completion(.success(base.faces.isEmpty ? (detail.faces.isEmpty ? url : root.appendingPathComponent("exports/detail-mesh.ply")) : baseURL))
             } catch { completion(.failure(error)) }
         }
     }
