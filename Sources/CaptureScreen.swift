@@ -105,7 +105,7 @@ struct CaptureScreen: View {
     }
 
     private var meshNotice: some View {
-        Label("LIVE MESH · turquoise lijnen zijn gemeten LiDAR-oppervlak", systemImage: "triangle.inset.filled")
+        Label("LIVE MESH · lijnen = LiDAR · lichtpunten worden dichter door fusie", systemImage: "triangle.inset.filled")
             .font(.caption2.weight(.semibold))
             .padding(.horizontal, 12).padding(.vertical, 7)
             .background(.black.opacity(0.62), in: Capsule())
@@ -365,7 +365,7 @@ private struct LiveQualityMap: View {
             for cell in cells {
                 let x = 8 + cell.normalizedPoint.x * (size.width - 16)
                 let y = 8 + cell.normalizedPoint.y * (size.height - 16)
-                let color: Color = cell.quality >= 0.72 ? .green : cell.quality >= 0.42 ? .orange : .red
+                let color: Color = cell.quality >= 0.55 ? .green : cell.quality >= 0.35 ? .orange : .red
                 context.fill(Path(roundedRect: CGRect(x: x - 4, y: y - 4, width: 8, height: 8), cornerRadius: 2), with: .color(color))
             }
         }

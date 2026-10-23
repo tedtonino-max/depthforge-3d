@@ -113,7 +113,13 @@ struct FusedVoxel {
         return 1 / (1 + sqrt(max(0, depthM2 / Float(observations - 1))) * 150)
     }
     var viewDiversity: Float { min(1, 1 - simd_length(viewDirectionSum) / Float(max(observations, 1))) }
-    var quality: Float { min(1, Float(observations) / 10) * 0.55 + viewDiversity * 0.2 + consistency * 0.25 }
+    /// Coverage is intentionally independent from camera-angle diversity. A stable
+    /// surface may become green after a few measurements; a separate instruction
+    /// then asks the user to add another angle instead of leaving the map red.
+    var quality: Float {
+        let coverage = min(1, Float(observations) / 3) * 0.60 + consistency * 0.40
+        return min(1, coverage * 0.85 + viewDiversity * 0.15)
+    }
 }
 
 extension simd_float4x4 {
