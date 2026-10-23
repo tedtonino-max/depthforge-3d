@@ -26,21 +26,37 @@ final class LiveMeshOverlay: NSObject, ARSCNViewDelegate {
             dataOffset: mesh.vertices.offset,
             dataStride: mesh.vertices.stride
         )
-        let element = SCNGeometryElement(
+        let surfaceElement = SCNGeometryElement(
             buffer: mesh.faces.buffer,
             primitiveType: .triangles,
             primitiveCount: mesh.faces.count,
             bytesPerIndex: mesh.faces.bytesPerIndex
         )
-        let geometry = SCNGeometry(sources: [source], elements: [element])
-        let material = SCNMaterial()
-        material.lightingModel = .constant
-        material.diffuse.contents = UIColor.systemTeal.withAlphaComponent(0.72)
-        material.emission.contents = UIColor.systemTeal.withAlphaComponent(0.45)
-        material.fillMode = .lines
-        material.isDoubleSided = true
-        material.writesToDepthBuffer = false
-        geometry.materials = [material]
+        surfaceElement.materialIndex = 0
+        let wireElement = SCNGeometryElement(
+            buffer: mesh.faces.buffer,
+            primitiveType: .triangles,
+            primitiveCount: mesh.faces.count,
+            bytesPerIndex: mesh.faces.bytesPerIndex
+        )
+        wireElement.materialIndex = 1
+        let geometry = SCNGeometry(sources: [source], elements: [surfaceElement, wireElement])
+
+        let surface = SCNMaterial()
+        surface.lightingModel = .constant
+        surface.diffuse.contents = UIColor.systemTeal.withAlphaComponent(0.18)
+        surface.emission.contents = UIColor.systemTeal.withAlphaComponent(0.12)
+        surface.isDoubleSided = true
+        surface.writesToDepthBuffer = false
+
+        let wire = SCNMaterial()
+        wire.lightingModel = .constant
+        wire.diffuse.contents = UIColor.systemTeal.withAlphaComponent(0.86)
+        wire.emission.contents = UIColor.systemTeal.withAlphaComponent(0.48)
+        wire.fillMode = .lines
+        wire.isDoubleSided = true
+        wire.writesToDepthBuffer = false
+        geometry.materials = [surface, wire]
         return geometry
     }
 }

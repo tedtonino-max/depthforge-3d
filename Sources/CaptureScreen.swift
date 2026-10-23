@@ -12,6 +12,24 @@ struct CaptureScreen: View {
     private var isScanning: Bool { scanner.state == .recording || scanner.state == .paused }
 
     var body: some View {
+        Group {
+            if scanner.state == .idle {
+                ScanWelcome()
+            } else {
+                captureExperience
+            }
+        }
+        .sheet(isPresented: $showGuide) { ScanGuide() }
+        .sheet(isPresented: $scanner.showShareSheet) {
+            if let url = scanner.shareURL { ShareSheet(items: [url]) }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active, scanner.state == .recording { scanner.pauseOrResume() }
+        }
+        .statusBarHidden()
+    }
+
+    private var captureExperience: some View {
         ZStack {
             CameraPreview(view: scanner.sceneView).ignoresSafeArea()
             if isScanning, scanner.captureTarget == .object {
@@ -26,14 +44,6 @@ struct CaptureScreen: View {
             }
             .padding(.bottom, 8)
         }
-        .sheet(isPresented: $showGuide) { ScanGuide() }
-        .sheet(isPresented: $scanner.showShareSheet) {
-            if let url = scanner.shareURL { ShareSheet(items: [url]) }
-        }
-        .onChange(of: scenePhase) { _, phase in
-            if phase != .active, scanner.state == .recording { scanner.pauseOrResume() }
-        }
-        .statusBarHidden()
     }
 
     private var topBar: some View {
@@ -48,16 +58,6 @@ struct CaptureScreen: View {
                         } label: {
                             Label(profile.title, systemImage: scanner.captureProfile == profile ? "checkmark" : "")
                         }
-                    }
-                }
-                Section("Wat wil je scannen?") {
-                    ForEach(CaptureTarget.allCases) { target in
-                        Button {
-                            scanner.captureTarget = target
-                        } label: {
-                            Label(target.title, systemImage: scanner.captureTarget == target ? "checkmark" : "circle")
-                        }
-                        .disabled(isScanning)
                     }
                 }
             } label: {
@@ -161,7 +161,7 @@ struct CaptureScreen: View {
                 Text("Ruwe diepteframes, poses en de PLY-export zijn lokaal bewaard.").font(.footnote).foregroundStyle(.secondary)
                 HStack {
                     Button("Exporteer PLY", action: scanner.exportAndShare).buttonStyle(.borderedProminent)
-                    Button("Nieuwe scan", action: scanner.start).buttonStyle(.bordered)
+                    Button("Nieuwe scan", action: scanner.returnToStart).buttonStyle(.bordered)
                 }
             }
         case .failed(let message):
@@ -170,7 +170,7 @@ struct CaptureScreen: View {
                 Text(message).font(.footnote)
                 Text("De fouttekst hierboven is de werkelijke iPad-fout. Start een nieuwe scan nadat je die hebt opgelost.")
                     .font(.caption).foregroundStyle(.secondary)
-                Button("Nieuwe scan", action: scanner.start).buttonStyle(.borderedProminent)
+                Button("Naar start", action: scanner.returnToStart).buttonStyle(.borderedProminent)
             }
         }
     }
@@ -206,6 +206,112 @@ struct CaptureScreen: View {
             .padding().frame(maxWidth: 500, alignment: .leading)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
             .padding(.horizontal)
+    }
+}
+
+private struct ScanWelcome: View {
+    @EnvironmentObject private var scanner: CaptureController
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [Color(red: 0.03, green: 0.06, blue: 0.09), Color(red: 0.05, green: 0.22, blue: 0.25)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    Spacer(minLength: 36)
+                    Label("DEPTHFORGE 3D", systemImage: "cube.transparent")
+                        .font(.headline.weight(.bold)).tracking(1.4).foregroundStyle(.mint)
+                    Text("Wat wil je\nscannen?")
+                        .font(.system(size: 42, weight: .bold, design: .rounded))
+                    Text("Kies dit eerst. Daarna krijg je alleen de feedback die past bij jouw scan.")
+                        .font(.body).foregroundStyle(.white.opacity(0.7))
+
+                    CaptureTargetCard(
+                        target: .object,
+                        title: "Voorwerp",
+                        subtitle: "Lamp, meubel of detailobject",
+                        detail: "Middenkader + live mesh + gerichte PLY",
+                        icon: "lamp.desk.fill",
+                        isSelected: scanner.captureTarget == .object
+                    ) { scanner.captureTarget = .object }
+
+                    CaptureTargetCard(
+                        target: .room,
+                        title: "Ruimte",
+                        subtitle: "Kamer of volledige omgeving",
+                        detail: "Vrij rondlopen + RoomPlan + live mesh",
+                        icon: "house.fill",
+                        isSelected: scanner.captureTarget == .room
+                    ) { scanner.captureTarget = .room }
+
+                    Button {
+                        scanner.start()
+                    } label: {
+                        HStack {
+                            Text(scanner.captureTarget == .object ? "Start voorwerpscan" : "Start ruimtescan")
+                            Spacer()
+                            Image(systemName: "arrow.right")
+                        }
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(.black)
+                        .padding()
+                        .background(.mint, in: RoundedRectangle(cornerRadius: 18))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 4)
+
+                    Text("LiDAR is vereist. Ruwe diepte, RGB en poses blijven lokaal op de iPad.")
+                        .font(.caption).foregroundStyle(.white.opacity(0.52))
+                    Spacer(minLength: 24)
+                }
+                .padding(24)
+                .frame(maxWidth: 620, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .center)
+            }
+        }
+    }
+}
+
+private struct CaptureTargetCard: View {
+    let target: CaptureTarget
+    let title: String
+    let subtitle: String
+    let detail: String
+    let icon: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 14) {
+                Image(systemName: icon)
+                    .font(.title2).frame(width: 40, height: 40)
+                    .foregroundStyle(isSelected ? .black : .mint)
+                    .background(isSelected ? .mint : .white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title).font(.headline)
+                    Text(subtitle).font(.subheadline).foregroundStyle(.white.opacity(0.75))
+                    Text(detail).font(.caption).foregroundStyle(.white.opacity(0.48))
+                }
+                Spacer()
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.title3).foregroundStyle(isSelected ? .mint : .white.opacity(0.45))
+            }
+            .foregroundStyle(.white)
+            .padding(16)
+            .background(isSelected ? .white.opacity(0.16) : .black.opacity(0.18), in: RoundedRectangle(cornerRadius: 20))
+            .overlay {
+                RoundedRectangle(cornerRadius: 20)
+                    .stroke(isSelected ? Color.mint.opacity(0.9) : .white.opacity(0.11), lineWidth: isSelected ? 2 : 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Selecteer \(target.title)")
     }
 }
 

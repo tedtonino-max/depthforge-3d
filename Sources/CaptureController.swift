@@ -51,10 +51,7 @@ final class CaptureController: NSObject, ObservableObject {
             if ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) { configuration.sceneReconstruction = .meshWithClassification }
             configuration.planeDetection = [.horizontal, .vertical]
             sceneView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
-            let room = RoomCaptureSession(arSession: sceneView.session)
-            room.delegate = self
-            room.run(configuration: .init())
-            roomSession = room
+            if captureTarget == .room { beginRoomCapture() }
             ensureGeometryDepthConfiguration()
             state = .recording
             statusLine = captureTarget == .object
@@ -66,13 +63,32 @@ final class CaptureController: NSObject, ObservableObject {
     func pauseOrResume() {
         switch state {
         case .recording:
-            // Keep RoomPlan's shared session alive; ending it here would finalize
-            // the RoomPlan result instead of merely pausing raw-frame acceptance.
-            state = .paused; statusLine = "Opname gepauzeerd; bestaande data is veilig op schijf."
+            // A pause must freeze the visual mesh and all incoming frames, not merely
+            // skip the PLY writer. RoomPlan is restarted on resume for room scans.
+            state = .paused
+            roomSession?.stop(pauseARSession: true)
+            roomSession = nil
+            sceneView.session.pause()
+            statusLine = "Scan is gepauzeerd. Mesh en opname staan stil."
         case .paused:
-            state = .recording; statusLine = "Opname hervat. Scan zwakke gebieden vanaf een andere hoek."
+            if let configuration = sceneView.session.configuration {
+                sceneView.session.run(configuration, options: [])
+            }
+            if captureTarget == .room { beginRoomCapture() }
+            state = .recording
+            statusLine = "Opname hervat. Beweeg vanuit een nieuwe hoek."
         default: break
         }
+    }
+
+    func returnToStart() {
+        roomSession?.stop(pauseARSession: true)
+        roomSession = nil
+        sceneView.session.pause()
+        projectedCells = []
+        quality = QualitySummary()
+        state = .idle
+        statusLine = "Kies eerst wat je wilt scannen."
     }
 
     func finish() {
@@ -105,6 +121,13 @@ final class CaptureController: NSObject, ObservableObject {
             state = .finished
             statusLine = "Opname veilig opgeslagen. Export bevat ruwe frames, poses, calibratie en PLY."
         } catch { state = .failed("Afronden mislukt: \(error.localizedDescription)") }
+    }
+
+    private func beginRoomCapture() {
+        let room = RoomCaptureSession(arSession: sceneView.session)
+        room.delegate = self
+        room.run(configuration: .init())
+        roomSession = room
     }
 
     /// RoomPlan can replace the shared AR session configuration when it begins a capture.
@@ -191,7 +214,7 @@ extension CaptureController: RoomCaptureSessionDelegate {
 
     nonisolated func captureSession(_ session: RoomCaptureSession, didEndWith data: CapturedRoomData, error: Error?) {
         Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self, self.state == .finishing else { return }
             if let error { self.statusLine = "RoomPlan niet beschikbaar: \(error.localizedDescription)"; self.finalize(room: nil); return }
             do {
                 let room = try await RoomBuilder(options: [.beautifyObjects]).capturedRoom(from: data)
