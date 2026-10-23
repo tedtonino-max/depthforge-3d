@@ -32,14 +32,12 @@ final class LiveMeshOverlay: NSObject, ARSCNViewDelegate {
             primitiveCount: mesh.faces.count,
             bytesPerIndex: mesh.faces.bytesPerIndex
         )
-        surfaceElement.materialIndex = 0
         let wireElement = SCNGeometryElement(
             buffer: mesh.faces.buffer,
             primitiveType: .triangles,
             primitiveCount: mesh.faces.count,
             bytesPerIndex: mesh.faces.bytesPerIndex
         )
-        wireElement.materialIndex = 1
         let geometry = SCNGeometry(sources: [source], elements: [surfaceElement, wireElement])
 
         let surface = SCNMaterial()
