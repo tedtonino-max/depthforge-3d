@@ -17,6 +17,7 @@ struct QualitySummary: Equatable {
     var coveredCells = 0
     var weakCells = 0
     var meanConsistency: Float = 0
+    var meanViewDiversity: Float = 0
     var advice: RescanAdvice = .moveCloser
     var status: String { "\(coveredCells) sterke · \(weakCells) opnieuw scannen · \(usableMeasurements) metingen" }
 }

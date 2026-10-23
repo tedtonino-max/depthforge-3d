@@ -76,13 +76,14 @@ final class GeometryFusion {
         let strong = values.filter { $0.quality >= 0.55 }.count
         let weak = max(0, values.count - strong)
         let consistency = values.isEmpty ? 0 : values.reduce(Float(0)) { $0 + $1.consistency } / Float(values.count)
+        let viewDiversity = values.isEmpty ? 0 : values.reduce(Float(0)) { $0 + $1.viewDiversity } / Float(values.count)
         let advice: RescanAdvice
         if values.isEmpty { advice = .moveCloser }
         else if weak > strong { advice = .revisit }
         else if consistency < 0.6 { advice = .holdSteady }
         else if values.filter({ $0.viewDiversity < 0.12 && $0.observations > 4 }).count > strong / 3 { advice = .changeAngle }
         else { advice = .complete }
-        return QualitySummary(usableMeasurements: usable, coveredCells: strong, weakCells: weak, meanConsistency: consistency, advice: advice)
+        return QualitySummary(usableMeasurements: usable, coveredCells: strong, weakCells: weak, meanConsistency: consistency, meanViewDiversity: viewDiversity, advice: advice)
     }
 
     func plyData() -> Data {

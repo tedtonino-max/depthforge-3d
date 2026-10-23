@@ -69,7 +69,10 @@ struct CaptureScreen: View {
                         .font(.title3.monospacedDigit().weight(.bold))
                 }
             }
-            if scanner.state == .recording || scanner.state == .paused { metrics }
+            if scanner.state == .recording || scanner.state == .paused {
+                metrics
+                qualitySignals
+            }
             controls
         }
         .foregroundStyle(Fieldwork.ink)
@@ -88,6 +91,15 @@ struct CaptureScreen: View {
     }
 
     private var divider: some View { FieldworkRule().frame(width: 1, height: 38).padding(.horizontal, 16) }
+
+    private var qualitySignals: some View {
+        HStack(spacing: 14) {
+            Label("Consistentie \(Int(scanner.quality.meanConsistency * 100))%", systemImage: "checkmark.circle")
+            Label("Kijkhoeken \(Int(scanner.quality.meanViewDiversity * 100))%", systemImage: "arrow.triangle.branch")
+        }
+        .font(.caption.monospacedDigit())
+        .foregroundStyle(Fieldwork.secondary)
+    }
 
     @ViewBuilder private var controls: some View {
         switch scanner.state {

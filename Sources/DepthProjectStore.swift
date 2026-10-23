@@ -37,6 +37,13 @@ final class DepthProjectStore {
         let intrinsics = frame.camera.intrinsics.codableColumnMajor
         let tracking = String(describing: frame.camera.trackingState)
         let timestamp = frame.timestamp
+        let depthWidth = CVPixelBufferGetWidth(depth.depthMap)
+        let depthHeight = CVPixelBufferGetHeight(depth.depthMap)
+        let depthPixelFormat = CVPixelBufferGetPixelFormatType(depth.depthMap)
+        let depthBytesPerRow = CVPixelBufferGetBytesPerRow(depth.depthMap)
+        let confidenceBytesPerRow = confidence.map { CVPixelBufferGetBytesPerRow($0) }
+        let imageWidth = CVPixelBufferGetWidth(frame.capturedImage)
+        let imageHeight = CVPixelBufferGetHeight(frame.capturedImage)
         queue.async { [weak self] in
             guard let self else { return }
             do {
@@ -57,7 +64,7 @@ final class DepthProjectStore {
                     try jpeg.write(to: root.appendingPathComponent(name), options: .atomic)
                     imageName = name
                 }
-                let record = FrameRecord(sequence: sequence, timestamp: timestamp, depthFile: depthName, confidenceFile: confidenceName, imageFile: imageName, depthWidth: CVPixelBufferGetWidth(depth.depthMap), depthHeight: CVPixelBufferGetHeight(depth.depthMap), depthPixelFormat: CVPixelBufferGetPixelFormatType(depth.depthMap), depthBytesPerRow: CVPixelBufferGetBytesPerRow(depth.depthMap), confidenceBytesPerRow: confidence.map(CVPixelBufferGetBytesPerRow), imageWidth: CVPixelBufferGetWidth(frame.capturedImage), imageHeight: CVPixelBufferGetHeight(frame.capturedImage), cameraTransform: transform, intrinsics: intrinsics, tracking: tracking)
+                let record = FrameRecord(sequence: sequence, timestamp: timestamp, depthFile: depthName, confidenceFile: confidenceName, imageFile: imageName, depthWidth: depthWidth, depthHeight: depthHeight, depthPixelFormat: depthPixelFormat, depthBytesPerRow: depthBytesPerRow, confidenceBytesPerRow: confidenceBytesPerRow, imageWidth: imageWidth, imageHeight: imageHeight, cameraTransform: transform, intrinsics: intrinsics, tracking: tracking)
                 let line = try self.encoder.encode(record) + Data([0x0A])
                 self.indexHandle?.write(line)
                 self.frameCount += 1
