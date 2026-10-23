@@ -29,13 +29,11 @@ final class CaptureController: NSObject, ObservableObject {
     private var completedRoom: CapturedRoom?
     private let accelerator = MetalFusionAccelerator()
     private let liveMeshOverlay = LiveMeshOverlay()
-    private let fusedSurfelOverlay = FusedSurfelOverlay()
 
     override init() {
         super.init()
         sceneView.session.delegate = self
         sceneView.delegate = liveMeshOverlay
-        fusedSurfelOverlay.attach(to: sceneView.scene.rootNode)
         sceneView.automaticallyUpdatesLighting = true
         metalEnabled = accelerator.isAvailable
     }
@@ -47,7 +45,7 @@ final class CaptureController: NSObject, ObservableObject {
         }
         do {
             scanRoot = try store.beginNewScan()
-            fusion.reset(); fusedSurfelOverlay.clear(); projectedCells = []; quality = QualitySummary(); sequence = 0; completedRoom = nil; roomPlanAvailable = false; shareURL = nil; lastSavedTimestamp = 0; lastHeatmapTimestamp = 0; lastConfigurationCheckTimestamp = 0
+            fusion.reset(); projectedCells = []; quality = QualitySummary(); sequence = 0; completedRoom = nil; roomPlanAvailable = false; shareURL = nil; lastSavedTimestamp = 0; lastHeatmapTimestamp = 0; lastConfigurationCheckTimestamp = 0
             let configuration = ARWorldTrackingConfiguration()
             configuration.frameSemantics = [.sceneDepth, .smoothedSceneDepth]
             if ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) { configuration.sceneReconstruction = .meshWithClassification }
@@ -88,7 +86,6 @@ final class CaptureController: NSObject, ObservableObject {
         roomSession = nil
         sceneView.session.pause()
         projectedCells = []
-        fusedSurfelOverlay.clear()
         quality = QualitySummary()
         state = .idle
         statusLine = "Kies eerst wat je wilt scannen."
@@ -183,7 +180,6 @@ extension CaptureController: ARSessionDelegate {
                 self.lastHeatmapTimestamp = timestamp
                 let orientation = self.sceneView.window?.windowScene?.interfaceOrientation ?? .portrait
                 self.projectedCells = self.fusion.projectedCells(camera: frame.camera, viewport: self.sceneView.bounds.size, orientation: orientation)
-                self.fusedSurfelOverlay.update(self.fusion.visualSurfels())
                 self.statusLine = self.quality.advice.rawValue
                 try? self.store.checkpoint(roomPlanFile: self.roomPlanAvailable ? "room/room.usdz" : nil)
             }

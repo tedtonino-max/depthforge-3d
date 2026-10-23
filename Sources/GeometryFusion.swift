@@ -100,15 +100,6 @@ final class GeometryFusion {
         return output.data(using: .utf8) ?? Data()
     }
 
-    func visualSurfels(maximum: Int = 35_000) -> [(position: SIMD3<Float>, color: SIMD3<UInt8>)] {
-        let values = Array(voxels.values)
-        guard !values.isEmpty else { return [] }
-        let step = max(1, values.count / maximum)
-        return values.enumerated().compactMap { index, voxel in
-            index.isMultiple(of: step) ? (voxel.position, voxel.color) : nil
-        }
-    }
-
     func projectedCells(camera: ARCamera, viewport: CGSize, orientation: UIInterfaceOrientation) -> [ProjectedQualityCell] {
         guard viewport.width > 0, viewport.height > 0 else { return [] }
         // Thousands of individual voxels can project to the same screen area. Aggregate

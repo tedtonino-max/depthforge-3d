@@ -105,7 +105,7 @@ struct CaptureScreen: View {
     }
 
     private var meshNotice: some View {
-        Label("LIVE MESH · lijnen = LiDAR · lichtpunten worden dichter door fusie", systemImage: "triangle.inset.filled")
+        Label("LIVE MESH · turquoise driehoeken zijn gemeten LiDAR-oppervlak", systemImage: "triangle.inset.filled")
             .font(.caption2.weight(.semibold))
             .padding(.horizontal, 12).padding(.vertical, 7)
             .background(.black.opacity(0.62), in: Capsule())
