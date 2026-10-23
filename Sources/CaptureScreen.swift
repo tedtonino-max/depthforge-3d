@@ -2,24 +2,23 @@ import ARKit
 import SwiftUI
 import UIKit
 
-/// Capture UI follows the supplied 3D Model Anything layout: camera-first,
-/// compact material controls, a persistent live map and one clear next action.
 struct CaptureScreen: View {
     @EnvironmentObject private var scanner: CaptureController
     @Environment(\.scenePhase) private var scenePhase
     @State private var showGuide = false
-
-    private var isScanning: Bool { scanner.state == .recording || scanner.state == .paused }
+    @State private var showPhotos = false
+    @State private var exportFolder = false
+    private var active: Bool { scanner.state == .recording || scanner.state == .paused || scanner.state == .review }
 
     var body: some View {
         Group {
-            if scanner.state == .idle {
-                ScanWelcome()
-            } else {
-                captureExperience
-            }
+            if scanner.state == .idle { welcome } else { capture }
         }
-        .sheet(isPresented: $showGuide) { ScanGuide() }
+        .sheet(isPresented: $showGuide) { guide }
+        .sheet(isPresented: $showPhotos) { gallery }
+        .sheet(isPresented: $exportFolder) {
+            if let root = scanner.scanRoot { ScanFolderExport(root: root) }
+        }
         .sheet(isPresented: $scanner.showShareSheet) {
             if let url = scanner.shareURL { ShareSheet(items: [url]) }
         }
@@ -29,434 +28,257 @@ struct CaptureScreen: View {
         .statusBarHidden()
     }
 
-    private var captureExperience: some View {
+    private var capture: some View {
         ZStack {
             CameraPreview(view: scanner.sceneView).ignoresSafeArea()
-            if scanner.state == .framing {
-                FloorVolumePicker().ignoresSafeArea()
+            if scanner.state == .framing { FloorVolumePicker().ignoresSafeArea() }
+            if scanner.choosingDetail {
+                Color.clear.contentShape(Rectangle()).ignoresSafeArea()
+                    .gesture(SpatialTapGesture().onEnded { scanner.selectDetail(at: $0.location) })
             }
-            VStack {
-                topBar
-                if isScanning { meshNotice }
-                Spacer()
-                if isScanning, !scanner.projectedCells.isEmpty { liveMap }
-                bottomPanel
-            }
-            .padding(.bottom, 8)
-        }
-    }
-
-    private var topBar: some View {
-        HStack(alignment: .top) {
-            Menu {
-                Button("Hoe scan ik goed?") { showGuide = true }
-                Divider()
-                Section("Opnameprofiel") {
-                    ForEach(CaptureProfile.allCases) { profile in
-                        Button {
-                            scanner.captureProfile = profile
-                        } label: {
-                            Label(profile.title, systemImage: scanner.captureProfile == profile ? "checkmark" : "")
+            VStack(spacing: 12) {
+                HStack(alignment: .top) {
+                    Menu {
+                        Button("Scanhandleiding") { showGuide = true }
+                        Toggle("Toon bevestigd oppervlak", isOn: $scanner.showSurface)
+                        Picker("Opname", selection: $scanner.captureProfile) {
+                            ForEach(CaptureProfile.allCases) { Text($0.title).tag($0) }
                         }
-                    }
-                }
-            } label: {
-                Image(systemName: "line.3.horizontal")
-                    .font(.headline).frame(width: 44, height: 44)
-                    .background(.ultraThinMaterial, in: Circle())
-            }
-            .accessibilityLabel("Scanopties")
-
-            Spacer()
-
-            HStack(spacing: 10) {
-                if isScanning { QualityRing(percent: scanner.quality.meanConsistency).frame(width: 44, height: 44) }
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text("DEPTHFORGE 3D").font(.caption.weight(.bold)).tracking(1)
-                    Text(isScanning ? "\(scanner.captureTarget.title) · \(stateTitle)" : stateTitle)
-                        .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-                    if isScanning {
-                        Text("\(scanner.quality.coveredCells) sterk · \(scanner.quality.weakCells) nog verbeteren")
-                            .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
-                    } else {
-                        Text(scanner.captureProfile.title).font(.caption2)
-                    }
-                }
-            }
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-        }
-        .padding(.horizontal).padding(.top, 8)
-    }
-
-    private var liveMap: some View {
-        HStack(alignment: .top, spacing: 10) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("DIT KADER").font(.system(size: 9, weight: .bold, design: .monospaced)).tracking(1)
-                Text(qualityMessage).font(.system(size: 10, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
-                Text("rood = opnieuw\noranje = extra hoek\ngroen = klaar").font(.system(size: 9)).foregroundStyle(.secondary)
-            }
-            LiveQualityMap(cells: scanner.projectedCells).frame(width: 112, height: 112)
-        }
-        .padding(8)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-        .frame(maxWidth: .infinity, alignment: .trailing)
-        .padding(.horizontal)
-    }
-
-    private var meshNotice: some View {
-        Label(meshStatus, systemImage: "triangle.inset.filled")
-            .font(.caption2.weight(.semibold))
-            .padding(.horizontal, 12).padding(.vertical, 7)
-            .background(.black.opacity(0.62), in: Capsule())
-            .padding(.top, 8)
-    }
-
-    private var meshStatus: String {
-        guard scanner.captureTarget == .object else {
-            return "LIVE MESH · turquoise driehoeken tonen de LiDAR-reconstructie"
-        }
-        guard scanner.liveMeshPasses > 0 else {
-            return "LIVE DRAADMESH · eerste meetlijnen worden opgebouwd"
-        }
-        return "LIVE DRAADMESH · pass \(scanner.liveMeshPasses) · \(scanner.liveMeshTriangles) driehoeken"
-    }
-
-    @ViewBuilder private var bottomPanel: some View {
-        switch scanner.state {
-        case .idle:
-            panel {
-                Label("Klaar om te scannen", systemImage: "viewfinder").font(.headline)
-                Text(scanner.captureTarget == .object
-                     ? "Houd één voorwerp in het middenkader. De PLY-fusie volgt alleen dat venster; ruwe frames blijven volledig lokaal bewaard."
-                     : "DepthForge legt de ruimte vast met LiDAR, RGB, cameraposes en RoomPlan.")
-                    .font(.footnote).foregroundStyle(.secondary)
-                HStack {
-                    Image(systemName: scanner.captureProfile == .maximumGeometry ? "scope" : "speedometer")
-                    Text("\(scanner.captureTarget.detail) · \(scanner.captureProfile.detail)").font(.caption)
+                    } label: {
+                        Image(systemName: "slider.horizontal.3").frame(width: 44, height: 44)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }.accessibilityLabel("Scanopties")
                     Spacer()
-                    Button("Start scan", action: scanner.start).buttonStyle(.borderedProminent).controlSize(.large)
+                    VStack(alignment: .trailing, spacing: 4) {
+                        Text("DEPTHFORGE 3D").font(.caption.weight(.bold)).tracking(1)
+                        Text(scanner.captureTarget.title).font(.caption).foregroundStyle(.secondary)
+                        if active {
+                            Text("\(scanner.savedFrames) frames bewaard").font(.caption2.monospacedDigit())
+                        }
+                    }.padding(12).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
                 }
-            }
+                if active {
+                    Text(scanner.quality.totalStable == 0 ? "Oppervlak wordt opgebouwd" : "Bevestigd oppervlak · \(scanner.quality.totalStable) elementen")
+                        .font(.caption2).padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(.black.opacity(0.55), in: Capsule())
+                }
+                Spacer()
+                if !scanner.photos.isEmpty, active || scanner.state == .finished {
+                    Button { showPhotos = true } label: {
+                        HStack(spacing: 8) {
+                            ForEach(Array(scanner.photos.suffix(3))) { photo in
+                                Image(uiImage: photo.thumbnail).resizable().scaledToFill()
+                                    .frame(width: 40, height: 40).clipShape(RoundedRectangle(cornerRadius: 6))
+                            }
+                            Text("\(scanner.photos.count) fotomomenten").font(.caption.weight(.semibold))
+                        }.padding(8).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    }.buttonStyle(.plain)
+                }
+                bottom
+            }.padding(.horizontal, 18).padding(.top, 8).padding(.bottom, 16)
+        }
+    }
+
+    @ViewBuilder private var bottom: some View {
+        switch scanner.state {
+        case .idle: EmptyView()
         case .framing:
             panel {
-                Label("Teken het scanvolume", systemImage: "circle.dashed.inset.filled").font(.headline)
-                Text("Teken op de vloer een cirkel rond het voorwerp. De groene cilinder is het enige gebied dat naar de live mesh en PLY gaat. Er wordt nog niets opgeslagen.")
-                    .font(.footnote).foregroundStyle(.secondary)
+                Text("Kies je scanvolume").font(.headline)
+                Text(scanner.statusLine).font(.subheadline)
+                if let volume = scanner.objectScanVolume {
+                    HStack {
+                        Text("Hoogte \(volume.height, specifier: "%.1f") m").font(.caption).frame(width: 100, alignment: .leading)
+                        Slider(value: Binding(get: { Double(scanner.objectScanVolume?.height ?? 1.5) },
+                                              set: { scanner.setVolumeHeight(Float($0)) }), in: 0.2...3, step: 0.1)
+                            .accessibilityLabel("Hoogte van het scanvolume")
+                    }
+                }
                 HStack {
-                    Button("Opnieuw plaatsen", action: scanner.clearObjectVolume).buttonStyle(.bordered)
+                    Button("Opnieuw", action: scanner.clearObjectVolume).buttonStyle(.bordered)
                     Spacer()
-                    Button("Start scan", action: scanner.confirmObjectVolume)
-                        .buttonStyle(.borderedProminent)
+                    Button("Begin met meten", action: scanner.confirmObjectVolume)
+                        .buttonStyle(.borderedProminent).disabled(scanner.objectScanVolume == nil)
                 }
-                Button("Annuleer", action: scanner.returnToStart)
-                    .font(.caption).foregroundStyle(.secondary)
+                Button("Annuleer", action: scanner.returnToStart).font(.caption)
             }
+        case .preparing, .finishing:
+            panel { HStack { ProgressView(); Text(scanner.statusLine) } }
         case .recording:
-            VStack(spacing: 10) {
-                tip(scanner.statusLine)
-                HStack(spacing: 14) {
-                    ScanLegend()
-                    Button(action: scanner.pauseOrResume) { Image(systemName: "pause.fill") }
-                        .buttonStyle(.bordered).controlSize(.large).accessibilityLabel("Pauzeer scan")
-                    ScanPulse(quality: scanner.quality)
-                    Button(scanner.quality.advice == .complete ? "Opslaan ✓" : "Scan opslaan", action: scanner.finish)
-                        .buttonStyle(.borderedProminent)
-                        .tint(scanner.quality.advice == .complete ? .green : .accentColor)
-                        .controlSize(.large)
+            panel {
+                Text(scanner.statusLine).font(.headline).accessibilityAddTraits(.updatesFrequently)
+                if scanner.choosingDetail {
+                    Text("De ring kiest een oppervlak van ongeveer 70 cm breed. Binnen de ring meten we dichter en beoordelen we het detail afzonderlijk.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        Button("Terug", action: scanner.cancelDetail).buttonStyle(.bordered)
+                        Spacer()
+                        Button("Bevestig detailzone", action: scanner.confirmDetail)
+                            .buttonStyle(.borderedProminent).disabled(scanner.pendingZone == nil)
+                    }
+                } else {
+                    if let notice = scanner.resourceNotice {
+                        Text(notice).font(.caption).foregroundStyle(.orange)
+                    }
+                    HStack {
+                        Button(action: scanner.chooseDetail) { Label("Detailzone", systemImage: "scope") }
+                            .buttonStyle(.bordered)
+                        Button(action: scanner.pauseOrResume) { Image(systemName: "pause.fill") }
+                            .buttonStyle(.bordered).accessibilityLabel("Pauzeer")
+                        Spacer(minLength: 4)
+                        Button("Controleer", action: scanner.review).buttonStyle(.borderedProminent)
+                    }
                 }
             }
-            .padding(.horizontal)
         case .paused:
             panel {
-                Label("Scan gepauzeerd", systemImage: "pause.circle.fill").font(.headline)
-                Text("Er worden geen nieuwe frames opgeslagen. Hervat wanneer je klaar bent voor de volgende hoek.")
-                    .font(.footnote).foregroundStyle(.secondary)
+                Text("Scan gepauzeerd").font(.headline)
+                if let notice = scanner.resourceNotice { Text(notice).font(.caption) }
                 HStack {
                     Button("Hervat", action: scanner.pauseOrResume).buttonStyle(.borderedProminent)
-                    Button("Nu opslaan", action: scanner.finish).buttonStyle(.bordered)
+                    Button("Controleer", action: scanner.review).buttonStyle(.bordered)
                 }
             }
-        case .finishing:
-            panel { HStack(spacing: 12) { ProgressView(); Text("Scan wordt lokaal opgeslagen…") } }
+        case .review:
+            panel {
+                Text("Controleer je scan").font(.headline)
+                Text("Mint toont alleen herhaald bevestigde oppervlakken. Open plekken zijn nog niet betrouwbaar gemeten. Bekijk ook de onderkant en dunne delen voordat je opslaat.")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                Text(scanner.quality.advice.rawValue).font(.caption.weight(.semibold))
+                Toggle("Toon bevestigd oppervlak", isOn: $scanner.showSurface)
+                HStack {
+                    Button("Verder scannen", action: scanner.pauseOrResume).buttonStyle(.bordered)
+                    Spacer()
+                    Button("Sla scan op", action: scanner.finish).buttonStyle(.borderedProminent)
+                }
+            }
         case .finished:
             panel {
-                Label("Scan opgeslagen", systemImage: "checkmark.seal.fill").font(.headline).foregroundStyle(.green)
-                Text("Ruwe diepteframes, poses en de PLY-export zijn lokaal bewaard.").font(.footnote).foregroundStyle(.secondary)
+                Label("Scan opgeslagen", systemImage: "checkmark.circle.fill").font(.headline).foregroundStyle(.mint)
+                Text("\(scanner.savedFrames) ruwe frames en \(scanner.photos.count) geselecteerde fotomomenten zijn lokaal bewaard. PLY bevat het bevestigde oppervlak met kleur en normaalrichting.")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                if let notice = scanner.roomNotice { Text(notice).font(.caption).foregroundStyle(.orange) }
                 HStack {
-                    Button("Exporteer PLY", action: scanner.exportAndShare).buttonStyle(.borderedProminent)
+                    Button("Deel PLY", action: scanner.exportAndShare).buttonStyle(.borderedProminent)
+                    Button("Bewaar scanmap") { exportFolder = true }.buttonStyle(.bordered)
                     Button("Nieuwe scan", action: scanner.returnToStart).buttonStyle(.bordered)
                 }
             }
         case .failed(let message):
             panel {
-                Label("Opslaan is onderbroken", systemImage: "exclamationmark.triangle.fill").font(.headline).foregroundStyle(.orange)
-                Text(message).font(.footnote)
-                Text("De fouttekst hierboven is de werkelijke iPad-fout. Start een nieuwe scan nadat je die hebt opgelost.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Label("Opname onderbroken", systemImage: "exclamationmark.triangle").font(.headline)
+                Text(message).font(.subheadline)
+                Text("Reeds geschreven frames blijven in de lokale scanmap.").font(.caption).foregroundStyle(.secondary)
                 Button("Naar start", action: scanner.returnToStart).buttonStyle(.borderedProminent)
             }
         }
     }
 
-    private var stateTitle: String {
-        switch scanner.state {
-        case .idle: "Klaar voor LiDAR"
-        case .framing: "Scanvolume kiezen"
-        case .recording: "Opnemen"
-        case .paused: "Gepauzeerd"
-        case .finishing: "Opslaan"
-        case .finished: "Opgeslagen"
-        case .failed: "Actie nodig"
-        }
-    }
-
-    private var qualityMessage: String {
-        switch scanner.quality.advice {
-        case .moveCloser: "Nog geen bruikbare diepte"
-        case .changeAngle: "Beweeg 30 cm zijwaarts"
-        case .holdSteady: "Houd 1 seconde stil"
-        case .revisit: "Neem twee extra hoeken"
-        case .complete: "Dit beeld is sterk"
-        }
-    }
-
-    private func tip(_ text: String) -> some View {
-        Text(text).font(.caption).multilineTextAlignment(.center)
-            .padding(8).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
-    }
-
-    private func panel<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 12, content: content)
-            .padding().frame(maxWidth: 500, alignment: .leading)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
-            .padding(.horizontal)
-    }
-}
-
-private struct ScanWelcome: View {
-    @EnvironmentObject private var scanner: CaptureController
-
-    var body: some View {
+    private var welcome: some View {
         ZStack {
-            LinearGradient(
-                colors: [Color(red: 0.03, green: 0.06, blue: 0.09), Color(red: 0.05, green: 0.22, blue: 0.25)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            .ignoresSafeArea()
-
+            LinearGradient(colors: [Color(red: 0.03, green: 0.06, blue: 0.09), Color(red: 0.05, green: 0.22, blue: 0.25)],
+                           startPoint: .topLeading, endPoint: .bottomTrailing).ignoresSafeArea()
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    Spacer(minLength: 36)
-                    Label("DEPTHFORGE 3D", systemImage: "cube.transparent")
-                        .font(.headline.weight(.bold)).tracking(1.4).foregroundStyle(.mint)
-                    Text("Wat wil je\nscannen?")
-                        .font(.system(size: 42, weight: .bold, design: .rounded))
-                    Text("Kies dit eerst. Daarna krijg je alleen de feedback die past bij jouw scan.")
-                        .font(.body).foregroundStyle(.white.opacity(0.7))
-
-                    CaptureTargetCard(
-                        target: .object,
-                        title: "Voorwerp",
-                        subtitle: "Lamp, meubel of detailobject",
-                        detail: "Middenkader + live mesh + gerichte PLY",
-                        icon: "lamp.desk.fill",
-                        isSelected: scanner.captureTarget == .object
-                    ) { scanner.captureTarget = .object }
-
-                    CaptureTargetCard(
-                        target: .room,
-                        title: "Ruimte",
-                        subtitle: "Kamer of volledige omgeving",
-                        detail: "Vrij rondlopen + RoomPlan + live mesh",
-                        icon: "house.fill",
-                        isSelected: scanner.captureTarget == .room
-                    ) { scanner.captureTarget = .room }
-
-                    Button {
-                        scanner.start()
-                    } label: {
-                        HStack {
-                            Text(scanner.captureTarget == .object ? "Start voorwerpscan" : "Start ruimtescan")
-                            Spacer()
-                            Image(systemName: "arrow.right")
-                        }
-                        .font(.headline.weight(.semibold))
-                        .foregroundStyle(.black)
-                        .padding()
-                        .background(.mint, in: RoundedRectangle(cornerRadius: 18))
+                VStack(alignment: .leading, spacing: 24) {
+                    Label("DEPTHFORGE 3D", systemImage: "cube.transparent").font(.headline).tracking(1.4).foregroundStyle(.mint)
+                    Text("Wat wil je\nscannen?").font(.system(size: 42, weight: .bold, design: .rounded))
+                    targetCard(.object, icon: "lamp.desk.fill", detail: "Teken een grondcirkel rond je voorwerp. Verfijn het oppervlak vanuit meerdere hoeken.")
+                    targetCard(.room, icon: "house.fill", detail: "Leg de kamer vast en kies een wand, vloer of hoek voor extra detail.")
+                    Button(action: scanner.start) {
+                        HStack { Text("Start \(scanner.captureTarget == .object ? "voorwerpscan" : "ruimtescan")"); Spacer(); Image(systemName: "arrow.right") }
+                            .font(.headline).foregroundStyle(.black).padding()
+                            .background(.mint, in: RoundedRectangle(cornerRadius: 16))
                     }
-                    .buttonStyle(.plain)
-                    .padding(.top, 4)
-
-                    Text("LiDAR is vereist. Ruwe diepte, RGB en poses blijven lokaal op de iPad.")
-                        .font(.caption).foregroundStyle(.white.opacity(0.52))
-                    Spacer(minLength: 24)
-                }
-                .padding(24)
-                .frame(maxWidth: 620, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .center)
+                    Text("LiDAR vereist · Alles blijft lokaal op je iPad\nHerhaalde metingen verminderen ruis. Detail dat de sensor niet ziet, wordt niet ingevuld.")
+                        .font(.caption).foregroundStyle(.white.opacity(0.6))
+                }.padding(28).frame(maxWidth: 620).frame(maxWidth: .infinity)
             }
         }
     }
-}
-
-private struct CaptureTargetCard: View {
-    let target: CaptureTarget
-    let title: String
-    let subtitle: String
-    let detail: String
-    let icon: String
-    let isSelected: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 14) {
-                Image(systemName: icon)
-                    .font(.title2).frame(width: 40, height: 40)
-                    .foregroundStyle(isSelected ? .black : .mint)
-                    .background(isSelected ? .mint : .white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(title).font(.headline)
-                    Text(subtitle).font(.subheadline).foregroundStyle(.white.opacity(0.75))
-                    Text(detail).font(.caption).foregroundStyle(.white.opacity(0.48))
+    private func targetCard(_ target: CaptureTarget, icon: String, detail: String) -> some View {
+        Button { scanner.captureTarget = target } label: {
+            HStack(spacing: 16) {
+                Image(systemName: icon).font(.title2).frame(width: 36).foregroundStyle(.mint)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(target.title).font(.title3.weight(.semibold))
+                    Text(detail).font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.leading)
                 }
                 Spacer()
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .font(.title3).foregroundStyle(isSelected ? .mint : .white.opacity(0.45))
-            }
-            .foregroundStyle(.white)
-            .padding(16)
-            .background(isSelected ? .white.opacity(0.16) : .black.opacity(0.18), in: RoundedRectangle(cornerRadius: 20))
-            .overlay {
-                RoundedRectangle(cornerRadius: 20)
-                    .stroke(isSelected ? Color.mint.opacity(0.9) : .white.opacity(0.11), lineWidth: isSelected ? 2 : 1)
-            }
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Selecteer \(target.title)")
+                Image(systemName: scanner.captureTarget == target ? "checkmark.circle.fill" : "circle").foregroundStyle(.mint)
+            }.padding(20).background(.white.opacity(scanner.captureTarget == target ? 0.14 : 0.05), in: RoundedRectangle(cornerRadius: 20))
+        }.buttonStyle(.plain)
     }
-}
-
-private struct QualityRing: View {
-    let percent: Float
-    var body: some View {
-        let value = min(1, max(0, percent))
-        ZStack {
-            Circle().stroke(.white.opacity(0.25), lineWidth: 5)
-            Circle().trim(from: 0, to: CGFloat(value))
-                .stroke(value > 0.7 ? .green : value > 0.35 ? .orange : .red, style: StrokeStyle(lineWidth: 5, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-            Text("\(Int(value * 100))%").font(.caption2.monospacedDigit().weight(.bold))
-        }
+    private func panel<C: View>(@ViewBuilder _ content: () -> C) -> some View {
+        VStack(alignment: .leading, spacing: 12, content: content)
+            .padding(18).frame(maxWidth: 540, alignment: .leading)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
     }
-}
-
-private struct ScanPulse: View {
-    let quality: QualitySummary
-    var body: some View {
-        ZStack {
-            Circle().fill(.white.opacity(0.92)).frame(width: 60, height: 60)
-            Circle().stroke(quality.advice == .complete ? .green : .orange, lineWidth: 3).frame(width: 52, height: 52)
-            Image(systemName: "cube.transparent").font(.title3).foregroundStyle(.black)
-        }
-        .accessibilityLabel("Live geometrie wordt opgenomen")
-    }
-}
-
-private struct ScanLegend: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            LegendRow(color: .red, text: "onvoldoende")
-            LegendRow(color: .orange, text: "opnieuw")
-            LegendRow(color: .green, text: "sterk")
-        }
-        .padding(6).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
-    }
-}
-
-private struct LegendRow: View {
-    let color: Color; let text: String
-    var body: some View { HStack(spacing: 4) { Circle().fill(color).frame(width: 7, height: 7); Text(text).font(.system(size: 9)) } }
-}
-
-private struct LiveQualityMap: View {
-    let cells: [ProjectedQualityCell]
-    var body: some View {
-        Canvas { context, size in
-            context.fill(Path(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: 8), with: .color(.black.opacity(0.18)))
-            for cell in cells {
-                let x = 8 + cell.normalizedPoint.x * (size.width - 16)
-                let y = 8 + cell.normalizedPoint.y * (size.height - 16)
-                let color: Color = cell.quality >= 0.55 ? .green : cell.quality >= 0.35 ? .orange : .red
-                context.fill(Path(roundedRect: CGRect(x: x - 4, y: y - 4, width: 8, height: 8), cornerRadius: 2), with: .color(color))
-            }
-        }
-    }
-}
-
-/// Draw on the visible floor: the first touch places a world-space circle and
-/// dragging adjusts its radius. The real circle is rendered by SceneKit, so it
-/// remains fixed to the floor while the iPad moves.
-private struct FloorVolumePicker: View {
-    @EnvironmentObject private var scanner: CaptureController
-    @State private var isDrawing = false
-
-    var body: some View {
-        Color.clear
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        if !isDrawing {
-                            isDrawing = true
-                            scanner.beginObjectVolume(at: value.startLocation)
+    private var gallery: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150))], spacing: 18) {
+                    ForEach(scanner.photos) { photo in
+                        VStack {
+                            Image(uiImage: photo.thumbnail).resizable().scaledToFit().clipShape(RoundedRectangle(cornerRadius: 12))
+                            Text("Kijkhoek \(photo.angleDegrees)°").font(.caption)
                         }
-                        scanner.resizeObjectVolume(to: value.location)
                     }
-                    .onEnded { _ in isDrawing = false }
-            )
-            .overlay(alignment: .top) {
-                Text(scanner.objectScanVolume == nil ? "Teken een cirkel op de vloer rond het voorwerp" : "Groene cirkel = het scanvolume")
-                    .font(.caption.weight(.semibold))
-                    .padding(.horizontal, 12).padding(.vertical, 7)
-                    .background(.black.opacity(0.62), in: Capsule())
-                    .padding(.top, 74)
-                    .allowsHitTesting(false)
-            }
+                }.padding()
+                Text("Geselecteerd bij een rustige pose, bruikbare belichting en een nieuwe kijkhoek. De originele foto's zijn gekoppeld aan diepte en camerapose; textuur-export volgt later.")
+                    .font(.footnote).foregroundStyle(.secondary).padding()
+            }.navigationTitle("Fotomomenten")
+                .toolbar { Button("Gereed") { showPhotos = false } }
+        }
     }
-}
-
-private struct ScanGuide: View {
-    @Environment(\.dismiss) private var dismiss
-    var body: some View {
+    private var guide: some View {
         NavigationStack {
             List {
-                Section("Voor het beste model") {
-                    Label("Begin 20–40 cm van een oppervlak.", systemImage: "ruler")
-                    Label("Beweeg rustig zijwaarts voor meerdere kijkhoeken.", systemImage: "arrow.left.and.right")
-                    Label("Volg rood en oranje op de kwaliteitskaart.", systemImage: "square.3.layers.3d")
+                Section("Voorwerp") {
+                    Text("Teken op de vloer een cirkel die het hele voorwerp omvat. Stel ook de hoogte in.")
+                    Text("Blijf rustig kijken tot het oppervlak verschijnt. Beweeg daarna zijwaarts voor een tweede hoek, ook laag bij pootjes en randen.")
                 }
-                Section("Wat wordt bewaard") {
-                    Text("Ruwe LiDAR-diepte, confidence, RGB, cameraposes, calibratie, RoomPlan en PLY blijven lokaal op de iPad.")
+                Section("Detailzone") {
+                    Text("Tik een oppervlak aan en bevestig de ring. De app verwerkt daar meer dieptepunten en vraagt om meerdere kijkhoeken.")
                 }
-            }
-            .navigationTitle("Scanhandleiding")
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Gereed") { dismiss() } } }
+                Section("Betrouwbare geometrie") {
+                    Text("Mint toont één gefuseerd oppervlak. Meerdere frames verfijnen dezelfde elementen. Onzekere of niet-gemeten delen blijven open.")
+                    Text("De feedback geldt voor de zichtbare gekozen zone; zij bewijst niet dat de achterkant of onderkant volledig is gescand.")
+                }
+                Section("Foto's en export") {
+                    Text("Houd de iPad kort stil vanuit een nieuwe hoek voor een automatisch fotomoment. PLY, diepte, RGB, confidence en poses blijven lokaal bewaard.")
+                }
+            }.navigationTitle("Scanhandleiding").toolbar { Button("Gereed") { showGuide = false } }
         }
     }
 }
 
+private struct FloorVolumePicker: View {
+    @EnvironmentObject private var scanner: CaptureController
+    @State private var drawing = false
+    var body: some View {
+        Color.clear.contentShape(Rectangle()).gesture(
+            DragGesture(minimumDistance: 0).onChanged { value in
+                if !drawing { drawing = true; scanner.beginObjectVolume(at: value.startLocation) }
+                scanner.resizeObjectVolume(to: value.location)
+            }.onEnded { _ in drawing = false }
+        )
+    }
+}
 private struct CameraPreview: UIViewRepresentable {
     let view: ARSCNView
     func makeUIView(context: Context) -> ARSCNView { view }
     func updateUIView(_ uiView: ARSCNView, context: Context) { }
 }
-
 private struct ShareSheet: UIViewControllerRepresentable {
     let items: [Any]
     func makeUIViewController(context: Context) -> UIActivityViewController { UIActivityViewController(activityItems: items, applicationActivities: nil) }
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) { }
+}
+
+private struct ScanFolderExport: UIViewControllerRepresentable {
+    let root: URL
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        UIDocumentPickerViewController(forExporting: [root], asCopy: true)
+    }
+    func updateUIViewController(_ controller: UIDocumentPickerViewController, context: Context) { }
 }

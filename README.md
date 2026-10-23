@@ -1,54 +1,85 @@
 # DepthForge 3D
 
-Een zelfstandige, native iPadOS-app voor LiDAR-gestuurde 3D-data-acquisitie. Dit
-project wijzigt HouseCapture niet en gebruikt geen netwerkverkeer.
+Native iPadOS LiDAR-scanner. Bouwen en verpakken gebeurt via de bestaande
+GitHub Actions-workflow; de ongesigneerde IPA wordt met iLoader geïnstalleerd.
 
-## Wat de app daadwerkelijk doet
+## Opname
 
-- gebruikt een gedeelde `ARSession` voor LiDAR `sceneDepth`, RGB en RoomPlan;
-- archiveert geaccepteerde, **onbewerkte** dieptebuffers, confidencebuffers,
-  kleurbeelden, cameraposes en intrinsics lokaal;
-- fuseert hoge-confidence dieptepunten progressief in een sparse voxelkaart;
-- toont een live kwaliteitslaag met meetdichtheid, kijkhoekdiversiteit,
-  consistentie en gaten, plus een concrete rescan-instructie;
-- maakt checkpoints tijdens het opnemen, hervat een bestaande opname en
-  exporteert een ASCII PLY; de volledige ruwe opname blijft als lokale scanmap
-  beschikbaar naast het RoomPlan-resultaat wanneer dat beschikbaar is.
+1. Kies Voorwerp of Ruimte.
+2. Voorwerp: teken een grondcirkel en stel de hoogte in. Alleen punten binnen
+   deze verticale cilinder mogen bijdragen aan het oppervlak en de PLY.
+3. Ruimte: start RoomPlan en tik een detailzone aan. Beide modi ondersteunen
+   een bevestigde detailring op rechtstreeks gemeten LiDAR-diepte.
+4. Loop rustig om het gekozen gebied heen. Mint toont herhaald bevestigde
+   oppervlakelementen, verankerd in de wereld. Het camerabeeld blijft zichtbaar.
+5. Controleer de scan en scan zo nodig verder. Deel daarna de PLY of bewaar de
+   hele scanmap via Bestanden.
 
-`sceneDepth` is LiDAR-data op de resolutie en nauwkeurigheid die ARKit op het
-toestel levert. De app claimt geen sub-millimeternauwkeurigheid: dat is voor de
-huidige iPad LiDAR-fysica en ARKit-depthkaart in het algemeen niet
-verifieerbaar. Herhaald scannen verhoogt de observatiedichtheid en kan de
-ruisrobustheid verbeteren, maar creëert geen niet-gemeten detail.
+## Echte surfel-fusie
 
-## Openen en bouwen
+`Sources/Core/SurfelFusion.swift` houdt één begrensde kaart met georiënteerde
+oppervlakelementen bij. Bestaande elementen worden in nieuwe diepteframes
+geprojecteerd en gekoppeld op positie, oppervlaktenormaal en lokaal residu.
+Herhaalde frames verbeteren dezelfde positie, kleur en normaal. Geen losse
+keyframevlakken, interpolatie over dieptesprongen of opgestapelde meshes.
 
-Op een Mac met Xcode 16+ en XcodeGen:
+Alleen hoge confidence wordt geïntegreerd. Er zijn minimaal vier onafhankelijke
+frames nodig voor weergave/export. Tegenspraak door zichtbaar vrije ruimte
+verwijdert oude geometrie; occlusie doet dat niet. De geometrische consistentie
+gebruikt het residu tot het oppervlak, niet de afstand van een bewegende camera.
+De PLY bevat bevestigde surfels met normaal, kleur, observatietelling en radius;
+het is geen waterdichte, getextureerde driehoeksmesh.
 
-```sh
-cd DepthForge3D
-xcodegen generate
-xcodebuild -project DepthForge3D.xcodeproj -scheme DepthForge3D \
-  -destination 'generic/platform=iOS' build
-```
+De dekking, meerdere kijkhoeken, residuen en ontbrekende metingen blijven aparte
+waarden. De instructie om op te slaan geldt alleen voor het zichtbare gekozen
+gebied, niet voor onzichtbare achterkanten. Twee relevante kijkrichtingen moeten
+meerdere keren bevestigd zijn. Er is geen abstract kwaliteitspercentage.
 
-Voor een echte scan is een iPad met LiDAR nodig (iPadOS 17+). De Simulator kan
-de app bouwen maar levert geen ARKit-scenediepte.
+## Grenzen en prestaties
 
-## Opnameformaat
+- Maximaal 100.000 surfels, 16.000 zichtbare surfels en 24 geselecteerde foto's.
+- Eén cameraframe tegelijk in de achtergrondverwerking, inclusief JPEG en schijf.
+- Integratielus heeft een 90-ms deadline. Overige stappen hebben harde invoer- en
+  elementlimieten; 90 ms is geen garantie voor de totale verwerkingstijd.
+- Bij belasting: lagere bemonstering, roterende werkvolgorde, lager opnametempo
+  en een zichtbare melding. Bij kritieke warmte wordt de opname gepauzeerd.
+- Het live oppervlak wordt aan de huidige diepte getoetst en verborgen zodra
+  beweging de laatste zichtbaarheidstest achterhaald maakt.
+- Fijnere bemonstering in het object/detailgebied is geen nauwkeurigheidsclaim.
+  Onzichtbare of te dunne details worden niet verzonnen.
 
-Elke opname staat lokaal in `Application Support/DepthForgeScans/<id>/` binnen de app-container:
+## Foto's en opnameformaat
+
+Ruwe RGB-beelden blijven gekoppeld aan frames. De fotogalerij gebruikt alleen
+beelden met een rustige pose gedurende minimaal 0,8 seconde, bruikbare
+belichting, zichtbaar scanonderwerp en een nieuwe kijkhoek. Dit zijn
+conservatieve selectiecriteria; er wordt nog geen texture-atlas gemaakt.
 
 ```text
-manifest.json                 opname- en toestelinformatie
-frames/index.jsonl            pose, intrinsics, afmetingen en bestandsnamen
-frames/000001.depthraw        native ARKit sceneDepth bytes; pixel format and row stride in index
-frames/000001.confidence8     UInt8 (0 laag, 1 medium, 2 hoog), indien ARKit die levert
-frames/000001.jpg             RGB-camerabeeld, indien JPEG-codering slaagt
-room/room.usdz                RoomPlan-export, indien RoomPlan voltooit
-exports/<id>.ply              gefuseerde point cloud
+manifest.json                 schema depthforge/2, volume, detailzones, fotoselectie
+frames/index.jsonl            diepteformaat, row strides, pose, intrinsics, RGB-pad
+frames/000001.depthraw        native sceneDepth bytes
+frames/000001.confidence8     native confidence
+frames/000001.jpg             RGB, ongeroteerd voor dezelfde cameracalibratie
+photos/000001-thumb.jpg       georiënteerde thumbnail voor geselecteerd fotomoment
+room/room.usdz                RoomPlan indien succesvol
+exports/fused-surface.ply     alleen het bevestigde oppervlak
 ```
 
-Het testscript `tools/benchmark_capture.py` controleert de twee aangeleverde
-HouseCapture-ZIPs read-only en vergelijkt hun aanwezige bestanden met het
-DepthForge-manifestconcept. Het verandert de brondata niet.
+## Controleren en bouwen
+
+GitHub Actions draait eerst de tests tegen dezelfde Swift-fusiekern die in de
+app wordt gebruikt. Daarna wordt de iPad-app gecompileerd en als één IPA verpakt.
+Op een Mac kunnen dezelfde controles handmatig worden uitgevoerd:
+
+```sh
+swift test -c release
+xcodegen generate
+xcodebuild -project DepthForge3D.xcodeproj -scheme DepthForge3D \
+  -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+  CODE_SIGNING_ALLOWED=NO build
+```
+
+Zie `VALIDATION.md` voor de expliciete grenzen van softwaretests en het vereiste
+iPad-protocol. LiDAR-kwaliteit en de visuele aansluiting op een echt object
+kunnen niet met alleen een groene build worden bewezen.

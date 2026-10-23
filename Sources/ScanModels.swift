@@ -1,44 +1,16 @@
 import ARKit
 import Foundation
 import simd
+import UIKit
 
-enum ScanState: Equatable { case idle, framing, recording, paused, finishing, finished, failed(String) }
-
-/// A real-world scan cylinder, placed on the floor before an object scan. Only
-/// measurements inside this volume contribute to the live mesh and PLY.
-struct ObjectScanVolume: Codable, Equatable {
-    var x: Float
-    var y: Float
-    var z: Float
-    var radius: Float
-    var height: Float
-
-    init(center: SIMD3<Float>, radius: Float = 0.24, height: Float = 1.5) {
-        x = center.x; y = center.y; z = center.z
-        self.radius = radius; self.height = height
-    }
-
-    var center: SIMD3<Float> { SIMD3(x, y, z) }
-
-    func resized(to radius: Float) -> ObjectScanVolume {
-        var copy = self
-        copy.radius = min(1.2, max(0.12, radius))
-        return copy
-    }
-
-    func contains(_ point: SIMD3<Float>) -> Bool {
-        let dx = point.x - x
-        let dz = point.z - z
-        return dx * dx + dz * dz <= radius * radius && point.y >= y - 0.06 && point.y <= y + height
-    }
-}
+enum ScanState: Equatable { case idle, framing, preparing, recording, paused, review, finishing, finished, failed(String) }
 
 enum CaptureProfile: String, CaseIterable, Identifiable {
     case maximumGeometry
     case balanced
 
     var id: String { rawValue }
-    var title: String { self == .maximumGeometry ? "Maximum geometry" : "Balanced" }
+    var title: String { self == .maximumGeometry ? "Maximaal detail" : "Gebalanceerd" }
     var detail: String { self == .maximumGeometry ? "Dichte fusie en vaker ruwe frames" : "Rustiger voor lange scans" }
     var frameInterval: TimeInterval { self == .maximumGeometry ? 0.17 : 0.25 }
     var sampleStride: Int { self == .maximumGeometry ? 2 : 4 }
@@ -55,27 +27,9 @@ enum CaptureTarget: String, CaseIterable, Identifiable {
     var title: String { self == .object ? "Voorwerp" : "Ruimte" }
     var detail: String {
         self == .object
-            ? "Houd het voorwerp binnen het middenkader"
+            ? "Teken een scanvolume rond het voorwerp"
             : "Leg de volledige kamer vast met RoomPlan"
     }
-}
-
-enum RescanAdvice: String, Codable, CaseIterable {
-    case moveCloser = "Ga 20–40 cm dichterbij en houd het oppervlak in beeld."
-    case changeAngle = "Beweeg zijwaarts: dit gebied heeft te weinig kijkhoeken."
-    case holdSteady = "Houd de iPad stil: de metingen zijn nog niet consistent."
-    case revisit = "Volg de gemarkeerde zones en neem twee extra kijkhoeken."
-    case complete = "Dit zichtbare gebied heeft voldoende bruikbare data."
-}
-
-struct QualitySummary: Equatable {
-    var usableMeasurements = 0
-    var coveredCells = 0
-    var weakCells = 0
-    var meanConsistency: Float = 0
-    var meanViewDiversity: Float = 0
-    var advice: RescanAdvice = .moveCloser
-    var status: String { "\(coveredCells) sterke · \(weakCells) opnieuw scannen · \(usableMeasurements) metingen" }
 }
 
 struct FrameRecord: Codable {
@@ -98,7 +52,7 @@ struct FrameRecord: Codable {
 }
 
 struct ScanManifest: Codable {
-    let schema = "depthforge/1"
+    let schema = "depthforge/2"
     let createdAt: Date
     let device: String
     let depthFormat = "Native sceneDepth CVPixelBuffer bytes; per-frame pixel format and row stride are recorded"
@@ -106,50 +60,9 @@ struct ScanManifest: Codable {
     var frames: Int
     var roomPlanFile: String?
     var objectScanVolume: ObjectScanVolume?
-}
-
-struct VoxelKey: Hashable {
-    let x: Int; let y: Int; let z: Int
-    init(_ point: SIMD3<Float>, cellSize: Float) {
-        x = Int(floor(point.x / cellSize)); y = Int(floor(point.y / cellSize)); z = Int(floor(point.z / cellSize))
-    }
-}
-
-struct FusedVoxel {
-    var position: SIMD3<Float>
-    var color: SIMD3<UInt8>
-    var observations: Int = 0
-    var meanDepth: Float = 0
-    var depthM2: Float = 0
-    var viewDirectionSum = SIMD3<Float>(repeating: 0)
-
-    mutating func add(position newPoint: SIMD3<Float>, color newColor: SIMD3<UInt8>, depth: Float, viewDirection: SIMD3<Float>) {
-        observations += 1
-        let count = Float(observations)
-        position += (newPoint - position) / count
-        color = SIMD3<UInt8>(
-            UInt8((Int(color.x) * (observations - 1) + Int(newColor.x)) / observations),
-            UInt8((Int(color.y) * (observations - 1) + Int(newColor.y)) / observations),
-            UInt8((Int(color.z) * (observations - 1) + Int(newColor.z)) / observations)
-        )
-        let delta = depth - meanDepth
-        meanDepth += delta / count
-        depthM2 += delta * (depth - meanDepth)
-        viewDirectionSum += simd_normalize(viewDirection)
-    }
-
-    var consistency: Float {
-        guard observations > 1 else { return 0 }
-        return 1 / (1 + sqrt(max(0, depthM2 / Float(observations - 1))) * 150)
-    }
-    var viewDiversity: Float { min(1, 1 - simd_length(viewDirectionSum) / Float(max(observations, 1))) }
-    /// Coverage is intentionally independent from camera-angle diversity. A stable
-    /// surface may become green after a few measurements; a separate instruction
-    /// then asks the user to add another angle instead of leaving the map red.
-    var quality: Float {
-        let coverage = min(1, Float(observations) / 3) * 0.60 + consistency * 0.40
-        return min(1, coverage * 0.85 + viewDiversity * 0.15)
-    }
+    var detailZones: [DetailZone] = []
+    var selectedPhotos: [PhotoRecord] = []
+    var deferredCaptureIntervals: Int = 0
 }
 
 extension simd_float4x4 {
@@ -158,4 +71,20 @@ extension simd_float4x4 {
 
 extension simd_float3x3 {
     var codableColumnMajor: [Float] { (0..<3).flatMap { column in (0..<3).map { self[column][$0] } } }
+}
+
+struct PhotoRecord: Codable, Identifiable {
+    let id: Int
+    let imageFile: String
+    let thumbnailFile: String
+    let cameraTransform: [Float]
+    let timestamp: TimeInterval
+    let angleDegrees: Int
+    let detailZoneID: UUID?
+}
+
+struct PhotoPreview: Identifiable {
+    let id: Int
+    let thumbnail: UIImage
+    let angleDegrees: Int
 }

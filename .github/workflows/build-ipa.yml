@@ -2,6 +2,8 @@ name: Build DepthForge 3D IPA
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
   push:
     branches: [main, master]
 
@@ -15,6 +17,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Test production fusion and photo selection
+        run: swift test -c release
+
+      - name: Parse iPad app sources
+        run: swiftc -frontend -parse Sources/*.swift Sources/Core/*.swift
+
       - name: Install XcodeGen
         run: brew install xcodegen
 
@@ -26,7 +34,7 @@ jobs:
           xcodebuild \
             -project DepthForge3D.xcodeproj \
             -scheme DepthForge3D \
-            -configuration Debug \
+            -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build \
@@ -36,7 +44,7 @@ jobs:
       - name: Package IPA
         run: |
           mkdir -p Payload
-          cp -R build/Build/Products/Debug-iphoneos/DepthForge3D.app Payload/
+          cp -R build/Build/Products/Release-iphoneos/DepthForge3D.app Payload/
           ditto -c -k --sequesterRsrc --keepParent Payload DepthForge3D-unsigned.ipa
 
       - name: Upload unsigned IPA
