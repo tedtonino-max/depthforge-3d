@@ -1,0 +1,7 @@
+.DS_Store
+DerivedData/
+build/
+*.xcuserstate
+xcuserdata/
+DepthForge3D.xcodeproj/
+__pycache__/
