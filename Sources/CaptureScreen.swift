@@ -137,7 +137,7 @@ private struct QualityRing: View {
         let percent = min(1, max(0, quality.meanConsistency))
         ZStack {
             Circle().stroke(Fieldwork.rule, lineWidth: 5)
-            Circle().trim(from: 0, to: percent)
+            Circle().trim(from: 0, to: CGFloat(percent))
                 .stroke(quality.advice == .complete ? .green : Fieldwork.orange, style: StrokeStyle(lineWidth: 5, lineCap: .round))
                 .rotationEffect(.degrees(-90))
             Text("\(Int(percent * 100))% ").font(.caption2.monospacedDigit().weight(.bold))
