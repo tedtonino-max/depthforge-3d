@@ -4,6 +4,17 @@ import simd
 
 enum ScanState: Equatable { case idle, recording, paused, finishing, finished, failed(String) }
 
+enum CaptureProfile: String, CaseIterable, Identifiable {
+    case maximumGeometry
+    case balanced
+
+    var id: String { rawValue }
+    var title: String { self == .maximumGeometry ? "Maximum geometry" : "Balanced" }
+    var detail: String { self == .maximumGeometry ? "Dichte fusie en vaker ruwe frames" : "Rustiger voor lange scans" }
+    var frameInterval: TimeInterval { self == .maximumGeometry ? 0.17 : 0.25 }
+    var sampleStride: Int { self == .maximumGeometry ? 2 : 4 }
+}
+
 enum RescanAdvice: String, Codable, CaseIterable {
     case moveCloser = "Ga 20–40 cm dichterbij en houd het oppervlak in beeld."
     case changeAngle = "Beweeg zijwaarts: dit gebied heeft te weinig kijkhoeken."

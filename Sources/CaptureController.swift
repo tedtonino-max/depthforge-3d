@@ -13,6 +13,7 @@ final class CaptureController: NSObject, ObservableObject {
     @Published private(set) var scanRoot: URL?
     @Published private(set) var metalEnabled = false
     @Published private(set) var roomPlanAvailable = false
+    @Published var captureProfile: CaptureProfile = .maximumGeometry
     @Published var showShareSheet = false
     @Published private(set) var shareURL: URL?
 
@@ -22,6 +23,7 @@ final class CaptureController: NSObject, ObservableObject {
     private var roomSession: RoomCaptureSession?
     private var lastSavedTimestamp: TimeInterval = 0
     private var lastHeatmapTimestamp: TimeInterval = 0
+    private var lastConfigurationCheckTimestamp: TimeInterval = 0
     private var sequence = 0
     private var completedRoom: CapturedRoom?
     private let accelerator = MetalFusionAccelerator()
@@ -40,7 +42,7 @@ final class CaptureController: NSObject, ObservableObject {
         }
         do {
             scanRoot = try store.beginNewScan()
-            fusion.reset(); sequence = 0; completedRoom = nil; roomPlanAvailable = false; shareURL = nil; lastSavedTimestamp = 0; lastHeatmapTimestamp = 0
+            fusion.reset(); sequence = 0; completedRoom = nil; roomPlanAvailable = false; shareURL = nil; lastSavedTimestamp = 0; lastHeatmapTimestamp = 0; lastConfigurationCheckTimestamp = 0
             let configuration = ARWorldTrackingConfiguration()
             configuration.frameSemantics = [.sceneDepth, .smoothedSceneDepth]
             if ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) { configuration.sceneReconstruction = .meshWithClassification }
@@ -50,8 +52,9 @@ final class CaptureController: NSObject, ObservableObject {
             room.delegate = self
             room.run(configuration: .init())
             roomSession = room
+            ensureGeometryDepthConfiguration()
             state = .recording
-            statusLine = "Leg eerst veel overlap vast; de kwaliteitslaag toont waar meer data nodig is."
+            statusLine = "LiDAR wordt gestart; richt op een wand of object met detail."
         } catch { state = .failed("Lokale opslag kon niet worden voorbereid: \(error.localizedDescription)") }
     }
 
@@ -98,20 +101,45 @@ final class CaptureController: NSObject, ObservableObject {
             statusLine = "Opname veilig opgeslagen. Export bevat ruwe frames, poses, calibratie en PLY."
         } catch { state = .failed("Afronden mislukt: \(error.localizedDescription)") }
     }
+
+    /// RoomPlan can replace the shared AR session configuration when it begins a capture.
+    /// Reapply required semantics without resetting tracking, then verify again during capture.
+    private func ensureGeometryDepthConfiguration() {
+        guard let current = sceneView.session.configuration as? ARWorldTrackingConfiguration,
+              let updated = current.copy() as? ARWorldTrackingConfiguration else { return }
+        var changed = false
+        if !updated.frameSemantics.contains(.sceneDepth) {
+            updated.frameSemantics.insert(.sceneDepth)
+            changed = true
+        }
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth), !updated.frameSemantics.contains(.smoothedSceneDepth) {
+            updated.frameSemantics.insert(.smoothedSceneDepth)
+            changed = true
+        }
+        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification), !updated.sceneReconstruction.contains(.meshWithClassification) {
+            updated.sceneReconstruction.insert(.meshWithClassification)
+            changed = true
+        }
+        if changed { sceneView.session.run(updated, options: []) }
+    }
 }
 
 extension CaptureController: ARSessionDelegate {
     nonisolated func session(_ session: ARSession, didUpdate frame: ARFrame) {
         Task { @MainActor [weak self] in
             guard let self, self.state == .recording, case .normal = frame.camera.trackingState else { return }
+            let timestamp = frame.timestamp
+            if timestamp - self.lastConfigurationCheckTimestamp >= 0.5 {
+                self.lastConfigurationCheckTimestamp = timestamp
+                self.ensureGeometryDepthConfiguration()
+            }
             guard frame.sceneDepth != nil else {
-                self.statusLine = "LiDAR-diepte wordt geïnitialiseerd…"
+                self.statusLine = "LiDAR-diepte wordt voorbereid; richt op een wand met structuur…"
                 return
             }
-            let timestamp = frame.timestamp
-            guard timestamp - self.lastSavedTimestamp >= 0.25 else { return } // preserves enough CPU headroom for tracking
+            guard timestamp - self.lastSavedTimestamp >= self.captureProfile.frameInterval else { return }
             self.lastSavedTimestamp = timestamp; self.sequence += 1
-            self.quality = self.fusion.integrate(frame: frame)
+            self.quality = self.fusion.integrate(frame: frame, sampleStride: self.captureProfile.sampleStride)
             self.store.append(frame: frame, sequence: self.sequence) { result in
                 Task { @MainActor [weak self] in
                     if case .failure(let error) = result {
@@ -139,6 +167,21 @@ extension CaptureController: ARSessionDelegate {
 }
 
 extension CaptureController: RoomCaptureSessionDelegate {
+    nonisolated func captureSession(_ session: RoomCaptureSession, didProvide instruction: RoomCaptureSession.Instruction) {
+        Task { @MainActor [weak self] in
+            guard let self, self.state == .recording else { return }
+            switch instruction {
+            case .moveCloseToWall: self.statusLine = "Ga 20–40 cm dichterbij voor meer detail."
+            case .moveAwayFromWall: self.statusLine = "Ga iets naar achteren zodat het oppervlak volledig zichtbaar is."
+            case .slowDown: self.statusLine = "Beweeg rustiger voor stabiele diepte en scherpe texturen."
+            case .turnOnLight: self.statusLine = "Meer licht helpt de RGB-texturen en tracking."
+            case .lowTexture: self.statusLine = "Richt op een hoek, rand of object met meer visueel detail."
+            case .normal: break
+            @unknown default: break
+            }
+        }
+    }
+
     nonisolated func captureSession(_ session: RoomCaptureSession, didEndWith data: CapturedRoomData, error: Error?) {
         Task { @MainActor [weak self] in
             guard let self else { return }
