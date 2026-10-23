@@ -29,6 +29,7 @@ struct FrameRecord: Codable {
     let imageFile: String
     let depthWidth: Int
     let depthHeight: Int
+    let depthPixelFormat: UInt32
     let depthBytesPerRow: Int
     let confidenceBytesPerRow: Int
     let imageWidth: Int
@@ -42,7 +43,7 @@ struct ScanManifest: Codable {
     let schema = "depthforge/1"
     let createdAt: Date
     let device: String
-    let depthFormat = "Float32 little-endian meters; sceneDepth (unsmoothed)"
+    let depthFormat = "Native sceneDepth CVPixelBuffer bytes; per-frame pixel format and row stride are recorded"
     let confidenceFormat = "UInt8 ARConfidenceLevel: 0 low, 1 medium, 2 high"
     var frames: Int
     var roomPlanFile: String?

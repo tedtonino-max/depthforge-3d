@@ -13,9 +13,10 @@ final class GeometryFusion {
 
     func reset() { voxels.removeAll(keepingCapacity: true) }
 
-    func integrate(frame: ARFrame, stride: Int = 4) -> QualitySummary {
+    func integrate(frame: ARFrame, sampleStride: Int = 4) -> QualitySummary {
         guard let depthData = frame.sceneDepth else { return summary() }
-        let depth = depthData.depthMap, confidence = depthData.confidenceMap
+        guard let confidence = depthData.confidenceMap else { return summary() }
+        let depth = depthData.depthMap
         CVPixelBufferLockBaseAddress(depth, .readOnly); CVPixelBufferLockBaseAddress(confidence, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(depth, .readOnly); CVPixelBufferUnlockBaseAddress(confidence, .readOnly) }
         guard let depthBase = CVPixelBufferGetBaseAddress(depth), let confidenceBase = CVPixelBufferGetBaseAddress(confidence) else { return summary() }
@@ -30,12 +31,19 @@ final class GeometryFusion {
         let cameraPosition = SIMD3<Float>(frame.camera.transform.columns.3.x, frame.camera.transform.columns.3.y, frame.camera.transform.columns.3.z)
         let sampler = YCbCrSampler(buffer: frame.capturedImage)
 
-        for y in stride(from: 0, to: depthHeight, by: stride) {
-            let depthLine = depthBase.advanced(by: y * depthRow).assumingMemoryBound(to: Float32.self)
+        let isFloat16 = CVPixelBufferGetPixelFormatType(depth) == kCVPixelFormatType_DepthFloat16
+        for y in Swift.stride(from: 0, to: depthHeight, by: sampleStride) {
             let confidenceLine = confidenceBase.advanced(by: y * confidenceRow).assumingMemoryBound(to: UInt8.self)
-            for x in stride(from: 0, to: depthWidth, by: stride) {
+            for x in Swift.stride(from: 0, to: depthWidth, by: sampleStride) {
                 guard confidenceLine[x] >= 1 else { continue }
-                let distance = depthLine[x]
+                let distance: Float
+                if isFloat16 {
+                    let line = depthBase.advanced(by: y * depthRow).assumingMemoryBound(to: Float16.self)
+                    distance = Float(line[x])
+                } else {
+                    let line = depthBase.advanced(by: y * depthRow).assumingMemoryBound(to: Float.self)
+                    distance = line[x]
+                }
                 guard distance.isFinite, distance > 0.08, distance < 8 else { continue }
                 let local = SIMD4<Float>((Float(x) - intrinsics.columns.2.x) * distance / intrinsics.columns.0.x,
                                          (Float(y) - intrinsics.columns.2.y) * distance / intrinsics.columns.1.y,

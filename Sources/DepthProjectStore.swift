@@ -26,9 +26,9 @@ final class DepthProjectStore {
     func append(frame: ARFrame, sequence: Int, completion: @escaping (Result<Void, Error>) -> Void) {
         guard let root else { completion(.failure(CocoaError(.fileNoSuchFile))); return }
         let depth = frame.sceneDepth
-        guard let depth else { completion(.failure(CocoaError(.fileReadUnknown))); return }
+        guard let depth, let confidence = depth.confidenceMap else { completion(.failure(CocoaError(.fileReadUnknown))); return }
         let depthCopy = PixelBufferCopy.make(depth.depthMap)
-        let confidenceCopy = PixelBufferCopy.make(depth.confidenceMap)
+        let confidenceCopy = PixelBufferCopy.make(confidence)
         let jpeg = PixelBufferCopy.jpeg(frame.capturedImage)
         let transform = frame.camera.transform.codableColumnMajor
         let intrinsics = frame.camera.intrinsics.codableColumnMajor
@@ -39,12 +39,12 @@ final class DepthProjectStore {
             do {
                 let prefix = String(format: "%06d", sequence)
                 let frameDirectory = root.appendingPathComponent("frames")
-                let depthName = "frames/\(prefix).depth32", confidenceName = "frames/\(prefix).confidence8", imageName = "frames/\(prefix).jpg"
+                let depthName = "frames/\(prefix).depthraw", confidenceName = "frames/\(prefix).confidence8", imageName = "frames/\(prefix).jpg"
                 try depthCopy.write(to: root.appendingPathComponent(depthName), options: .atomic)
                 try confidenceCopy.write(to: root.appendingPathComponent(confidenceName), options: .atomic)
                 guard let jpeg else { throw CocoaError(.fileWriteUnknown) }
                 try jpeg.write(to: root.appendingPathComponent(imageName), options: .atomic)
-                let record = FrameRecord(sequence: sequence, timestamp: timestamp, depthFile: depthName, confidenceFile: confidenceName, imageFile: imageName, depthWidth: CVPixelBufferGetWidth(depth.depthMap), depthHeight: CVPixelBufferGetHeight(depth.depthMap), depthBytesPerRow: CVPixelBufferGetBytesPerRow(depth.depthMap), confidenceBytesPerRow: CVPixelBufferGetBytesPerRow(depth.confidenceMap), imageWidth: CVPixelBufferGetWidth(frame.capturedImage), imageHeight: CVPixelBufferGetHeight(frame.capturedImage), cameraTransform: transform, intrinsics: intrinsics, tracking: tracking)
+                let record = FrameRecord(sequence: sequence, timestamp: timestamp, depthFile: depthName, confidenceFile: confidenceName, imageFile: imageName, depthWidth: CVPixelBufferGetWidth(depth.depthMap), depthHeight: CVPixelBufferGetHeight(depth.depthMap), depthPixelFormat: CVPixelBufferGetPixelFormatType(depth.depthMap), depthBytesPerRow: CVPixelBufferGetBytesPerRow(depth.depthMap), confidenceBytesPerRow: CVPixelBufferGetBytesPerRow(confidence), imageWidth: CVPixelBufferGetWidth(frame.capturedImage), imageHeight: CVPixelBufferGetHeight(frame.capturedImage), cameraTransform: transform, intrinsics: intrinsics, tracking: tracking)
                 let line = try self.encoder.encode(record) + Data([0x0A])
                 self.indexHandle?.write(line)
                 self.frameCount += 1
@@ -73,6 +73,6 @@ private enum PixelBufferCopy {
 
     static func jpeg(_ buffer: CVPixelBuffer) -> Data? {
         let image = CIImage(cvPixelBuffer: buffer)
-        return try? CIContext().jpegRepresentation(of: image, colorSpace: CGColorSpaceCreateDeviceRGB(), options: [.lossyCompressionQuality: 0.88])
+        return try? CIContext().jpegRepresentation(of: image, colorSpace: CGColorSpaceCreateDeviceRGB(), options: [:])
     }
 }

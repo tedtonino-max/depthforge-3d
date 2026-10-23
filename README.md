@@ -42,7 +42,7 @@ Elke opname staat in `Documents/DepthForgeScans/<id>/`:
 ```text
 manifest.json                 opname- en toestelinformatie
 frames/index.jsonl            pose, intrinsics, afmetingen en bestandsnamen
-frames/000001.depth32         little-endian Float32 meters, sceneDepth
+frames/000001.depthraw        native ARKit sceneDepth bytes; pixel format and row stride in index
 frames/000001.confidence8     UInt8 (0 laag, 1 medium, 2 hoog)
 frames/000001.jpg             RGB-camerabeeld
 room/room.usdz                RoomPlan-export, indien RoomPlan voltooit
