@@ -48,14 +48,17 @@ final class CapturePipeline {
                     zone: zone, stride: stride, detailStride: 1, budget: 0.12) else {
                     completion(.failure(CaptureError.noDepth)); return
                 }
-                input.selectionOnly = selectionOnly
+                input.selectionOnly = selectionOnly || zone != nil
                 if self.activeZone != zone?.id {
                     if selectionOnly { self.fusion.reset() }
                     self.activeZone = zone?.id; self.selector = PhotoSelector(); self.photoTarget = nil
                 }
                 self.selectedBoundary = selectionOnly ? zone : nil
                 if let zone { self.store.register(zone) }
-                let update = self.fusion.surface.integrate(input)
+                // Stage 1 uses ARKit topology. Dense processing starts only after painting.
+                let update = zone == nil
+                    ? SurfaceUpdate(quality: SurfaceQuality(), visibleSurfels: [], elapsed: 0)
+                    : self.fusion.surface.integrate(input)
                 if update.quality.limited {
                     self.detailStride = min(3, self.detailStride + 1); self.fastFrames = 0
                 } else if update.elapsed < 0.05 {
@@ -65,6 +68,11 @@ final class CapturePipeline {
                 if self.photoTarget == nil, update.visibleSurfels.count >= 24 {
                     self.photoTarget = zone?.center ?? update.visibleSurfels.reduce(Vec3.zero) { $0 + $1.position } / Float(update.visibleSurfels.count)
                 }
+                if self.photoTarget == nil, zone == nil {
+                    let x = input.camera.width / 2, y = input.camera.height / 2
+                    let i = y * input.camera.width + x
+                    if input.valid(i) { self.photoTarget = input.pose.world(input.camera.unproject(x: x, y: y, depth: input.depths[i])) }
+                }
                 let targetPoint = zone?.center ?? self.photoTarget
                 let light = frame.lightEstimate?.ambientIntensity ?? 0
                 // Exposure and pose gates are conservative heuristics, not a
@@ -72,7 +80,7 @@ final class CapturePipeline {
                 let exposureOK = light > 150 && frame.camera.exposureDuration < 1.0 / 45.0
                 let photo = self.photoCount < 24 && (targetPoint.map {
                     self.selector.candidate(timestamp: frame.timestamp, pose: input.pose, target: $0,
-                        visible: update.quality.stable >= 24 && input.visible($0, tolerance: 0.15), exposureOK: exposureOK)
+                        visible: (zone == nil || update.quality.stable >= 24) && input.visible($0, tolerance: 0.15), exposureOK: exposureOK)
                 } ?? false)
                 let direction = targetPoint.map { input.pose.position - $0 } ?? Vec3.zero
                 let angle = Int((atan2(direction.x, direction.z) * 180 / .pi + 360).truncatingRemainder(dividingBy: 360))

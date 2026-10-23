@@ -273,7 +273,7 @@ final class CaptureController: NSObject, ObservableObject {
         guard let current = sceneView.session.configuration as? ARWorldTrackingConfiguration,
               let updated = current.copy() as? ARWorldTrackingConfiguration else { return }
         let meshSupported = ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
-        guard !current.frameSemantics.contains(.sceneDepth) || (meshSupported && current.sceneReconstruction == .none) else { return }
+        guard !current.frameSemantics.contains(.sceneDepth) || (meshSupported && current.sceneReconstruction != .mesh) else { return }
         updated.frameSemantics.insert(.sceneDepth)
         if meshSupported { updated.sceneReconstruction = .mesh }
         sceneView.session.run(updated)

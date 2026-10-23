@@ -51,7 +51,7 @@ struct FrameRecord: Codable {
     let tracking: String
 }
 
-struct ScanManifest: Codable {
+struct ScanManifest: Encodable {
     let schema = "depthforge/3"
     let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
     let appBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
