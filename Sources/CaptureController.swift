@@ -17,6 +17,7 @@ final class CaptureController: NSObject, ObservableObject {
     @Published private(set) var liveMeshTriangles = 0
     @Published var captureProfile: CaptureProfile = .maximumGeometry
     @Published var captureTarget: CaptureTarget = .object
+    @Published var objectScanRegion: ObjectScanRegion = .initial
     @Published var showShareSheet = false
     @Published private(set) var shareURL: URL?
 
@@ -48,22 +49,48 @@ final class CaptureController: NSObject, ObservableObject {
             state = .failed("Dit apparaat ondersteunt geen LiDAR sceneDepth.")
             return
         }
+        let configuration = ARWorldTrackingConfiguration()
+        configuration.frameSemantics = [.sceneDepth, .smoothedSceneDepth]
+        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) { configuration.sceneReconstruction = .meshWithClassification }
+        configuration.planeDetection = [.horizontal, .vertical]
+        liveMeshOverlay.displaysNativeMesh = captureTarget == .room
+        sceneView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
+        if captureTarget == .object {
+            progressiveMesh.reset()
+            liveMeshPasses = 0
+            liveMeshTriangles = 0
+            state = .framing
+            statusLine = "Plaats en verschuif het scanvak. Er wordt nog niets opgeslagen."
+            return
+        }
+        beginRecording()
+    }
+
+    func confirmObjectRegion() {
+        guard state == .framing else { return }
+        beginRecording()
+    }
+
+    func moveObjectScanRegion(by normalizedOffset: CGSize) {
+        objectScanRegion = objectScanRegion.moved(by: normalizedOffset)
+    }
+
+    func scaleObjectScanRegion(by factor: CGFloat) {
+        objectScanRegion = objectScanRegion.scaled(by: factor)
+    }
+
+    private func beginRecording() {
         do {
-            scanRoot = try store.beginNewScan()
+            scanRoot = try store.beginNewScan(objectRegion: captureTarget == .object ? objectScanRegion : nil)
             fusion.reset(); progressiveMesh.reset(); projectedCells = []; quality = QualitySummary(); sequence = 0; completedRoom = nil; roomPlanAvailable = false; shareURL = nil; liveMeshPasses = 0; liveMeshTriangles = 0; lastSavedTimestamp = 0; lastHeatmapTimestamp = 0; lastPreviewMeshTimestamp = 0; lastConfigurationCheckTimestamp = 0
             // For object mode the visible mesh must be the measured progressive
             // depth mesh, not ARKit's coarse room reconstruction.
             liveMeshOverlay.displaysNativeMesh = captureTarget == .room
-            let configuration = ARWorldTrackingConfiguration()
-            configuration.frameSemantics = [.sceneDepth, .smoothedSceneDepth]
-            if ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) { configuration.sceneReconstruction = .meshWithClassification }
-            configuration.planeDetection = [.horizontal, .vertical]
-            sceneView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
             if captureTarget == .room { beginRoomCapture() }
             ensureGeometryDepthConfiguration()
             state = .recording
             statusLine = captureTarget == .object
-                ? "Plaats het voorwerp volledig binnen het middenkader."
+                ? "Scanvak actief. Beweeg rustig om het voorwerp vanuit nieuwe hoeken te meten."
                 : "LiDAR wordt gestart; richt op een wand of object met detail."
         } catch { state = .failed("Lokale opslag kon niet worden voorbereid: \(error.localizedDescription)") }
     }
@@ -178,7 +205,16 @@ extension CaptureController: ARSessionDelegate {
             }
             guard timestamp - self.lastSavedTimestamp >= self.captureProfile.frameInterval else { return }
             self.lastSavedTimestamp = timestamp; self.sequence += 1
-            self.quality = self.fusion.integrate(frame: frame, sampleStride: self.captureProfile.sampleStride, captureTarget: self.captureTarget)
+            let orientation = self.sceneView.window?.windowScene?.interfaceOrientation ?? .portrait
+            let viewport = self.sceneView.bounds.size
+            self.quality = self.fusion.integrate(
+                frame: frame,
+                sampleStride: self.captureProfile.sampleStride,
+                captureTarget: self.captureTarget,
+                objectRegion: self.objectScanRegion,
+                orientation: orientation,
+                viewport: viewport
+            )
             if self.captureTarget == .object,
                timestamp - self.lastPreviewMeshTimestamp >= 0.8 {
                 self.lastPreviewMeshTimestamp = timestamp
@@ -187,7 +223,10 @@ extension CaptureController: ARSessionDelegate {
                     from: frame,
                     captureTarget: self.captureTarget,
                     profile: self.captureProfile,
-                    pass: nextPass
+                    pass: nextPass,
+                    objectRegion: self.objectScanRegion,
+                    orientation: orientation,
+                    viewport: viewport
                 ) {
                     self.liveMeshPasses = patch.pass
                     self.liveMeshTriangles = patch.triangles
@@ -203,8 +242,7 @@ extension CaptureController: ARSessionDelegate {
             }
             if timestamp - self.lastHeatmapTimestamp > 0.5 {
                 self.lastHeatmapTimestamp = timestamp
-                let orientation = self.sceneView.window?.windowScene?.interfaceOrientation ?? .portrait
-                self.projectedCells = self.fusion.projectedCells(camera: frame.camera, viewport: self.sceneView.bounds.size, orientation: orientation)
+                self.projectedCells = self.fusion.projectedCells(camera: frame.camera, viewport: viewport, orientation: orientation)
                 self.statusLine = self.quality.advice.rawValue
                 try? self.store.checkpoint(roomPlanFile: self.roomPlanAvailable ? "room/room.usdz" : nil)
             }

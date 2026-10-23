@@ -14,7 +14,14 @@ final class GeometryFusion {
 
     func reset() { voxels.removeAll(keepingCapacity: true) }
 
-    func integrate(frame: ARFrame, sampleStride: Int = 4, captureTarget: CaptureTarget = .object) -> QualitySummary {
+    func integrate(
+        frame: ARFrame,
+        sampleStride: Int = 4,
+        captureTarget: CaptureTarget = .object,
+        objectRegion: ObjectScanRegion = .initial,
+        orientation: UIInterfaceOrientation = .portrait,
+        viewport: CGSize = .zero
+    ) -> QualitySummary {
         guard let depthData = frame.sceneDepth else { return summary() }
         let confidence = depthData.confidenceMap
         let depth = depthData.depthMap
@@ -30,6 +37,9 @@ final class GeometryFusion {
         let depthRow = CVPixelBufferGetBytesPerRow(depth)
         let confidenceRow = confidence.map(CVPixelBufferGetBytesPerRow)
         let imageSize = frame.camera.imageResolution
+        let displayTransform = viewport.width > 0 && viewport.height > 0
+            ? frame.displayTransform(for: orientation, viewportSize: viewport)
+            : .identity
         var intrinsics = frame.camera.intrinsics
         intrinsics.columns.0.x *= Float(depthWidth) / Float(imageSize.width)
         intrinsics.columns.1.y *= Float(depthHeight) / Float(imageSize.height)
@@ -40,7 +50,14 @@ final class GeometryFusion {
 
         let isFloat16 = CVPixelBufferGetPixelFormatType(depth) == kCVPixelFormatType_DepthFloat16
         let targetDepth = captureTarget == .object
-            ? estimatedTargetDepth(base: depthBase, rowBytes: depthRow, width: depthWidth, height: depthHeight, isFloat16: isFloat16)
+            ? estimatedTargetDepth(
+                base: depthBase,
+                rowBytes: depthRow,
+                width: depthWidth,
+                height: depthHeight,
+                isFloat16: isFloat16,
+                center: objectRegion.depthCenter(displayTransform: displayTransform)
+            )
             : nil
         for y in Swift.stride(from: 0, to: depthHeight, by: sampleStride) {
             let confidenceLine = confidenceBase.map { $0.advanced(by: y * (confidenceRow ?? 0)).assumingMemoryBound(to: UInt8.self) }
@@ -49,11 +66,13 @@ final class GeometryFusion {
                 let distance = depthValue(base: depthBase, rowBytes: depthRow, x: x, y: y, isFloat16: isFloat16)
                 guard distance.isFinite, distance > 0.08, distance < 8 else { continue }
                 if captureTarget == .object {
-                    let normalizedX = Float(x) / Float(depthWidth)
-                    let normalizedY = Float(y) / Float(depthHeight)
-                    // The window is deliberately conservative: it gives a tangible
-                    // object-focused PLY without pretending to segment the object.
-                    guard normalizedX > 0.18, normalizedX < 0.82, normalizedY > 0.14, normalizedY < 0.86 else { continue }
+                    guard objectRegion.contains(
+                        depthX: x,
+                        depthY: y,
+                        depthWidth: depthWidth,
+                        depthHeight: depthHeight,
+                        displayTransform: displayTransform
+                    ) else { continue }
                     if let targetDepth, abs(distance - targetDepth) > 0.35 { continue }
                 }
                 let local = SIMD4<Float>((Float(x) - intrinsics.columns.2.x) * distance / intrinsics.columns.0.x,
@@ -130,8 +149,9 @@ final class GeometryFusion {
         }
     }
 
-    private func estimatedTargetDepth(base: UnsafeMutableRawPointer, rowBytes: Int, width: Int, height: Int, isFloat16: Bool) -> Float? {
-        let centerX = width / 2, centerY = height / 2
+    private func estimatedTargetDepth(base: UnsafeMutableRawPointer, rowBytes: Int, width: Int, height: Int, isFloat16: Bool, center: CGPoint) -> Float? {
+        let centerX = min(width - 1, max(0, Int(center.x * CGFloat(width))))
+        let centerY = min(height - 1, max(0, Int(center.y * CGFloat(height))))
         var samples: [Float] = []
         for y in max(0, centerY - 5)...min(height - 1, centerY + 5) {
             for x in max(0, centerX - 5)...min(width - 1, centerX + 5) {

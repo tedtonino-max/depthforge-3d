@@ -28,10 +28,19 @@ final class ProgressiveDepthMeshOverlay {
         from frame: ARFrame,
         captureTarget: CaptureTarget,
         profile: CaptureProfile,
-        pass: Int
+        pass: Int,
+        objectRegion: ObjectScanRegion,
+        orientation: UIInterfaceOrientation,
+        viewport: CGSize
     ) -> MeasuredMeshPatch? {
         guard captureTarget == .object,
-              let mesh = makeGeometry(from: frame, sampleStep: sampleStep(for: pass, profile: profile)) else {
+              let mesh = makeGeometry(
+                from: frame,
+                sampleStep: sampleStep(for: pass, profile: profile),
+                objectRegion: objectRegion,
+                orientation: orientation,
+                viewport: viewport
+              ) else {
             return nil
         }
         let node = SCNNode(geometry: mesh.geometry)
@@ -64,7 +73,13 @@ final class ProgressiveDepthMeshOverlay {
         }
     }
 
-    private func makeGeometry(from frame: ARFrame, sampleStep: Int) -> (geometry: SCNGeometry, triangles: Int)? {
+    private func makeGeometry(
+        from frame: ARFrame,
+        sampleStep: Int,
+        objectRegion: ObjectScanRegion,
+        orientation: UIInterfaceOrientation,
+        viewport: CGSize
+    ) -> (geometry: SCNGeometry, triangles: Int)? {
         guard let depthData = frame.sceneDepth else { return nil }
         let depth = depthData.depthMap
         let confidence = depthData.confidenceMap
@@ -82,7 +97,17 @@ final class ProgressiveDepthMeshOverlay {
         let confidenceBase = confidence.flatMap(CVPixelBufferGetBaseAddress)
         let confidenceRowBytes = confidence.map(CVPixelBufferGetBytesPerRow) ?? 0
         let isFloat16 = CVPixelBufferGetPixelFormatType(depth) == kCVPixelFormatType_DepthFloat16
-        guard let targetDepth = targetDepth(base: depthBase, rowBytes: depthRowBytes, width: width, height: height, isFloat16: isFloat16) else { return nil }
+        let displayTransform = viewport.width > 0 && viewport.height > 0
+            ? frame.displayTransform(for: orientation, viewportSize: viewport)
+            : .identity
+        guard let targetDepth = targetDepth(
+            base: depthBase,
+            rowBytes: depthRowBytes,
+            width: width,
+            height: height,
+            isFloat16: isFloat16,
+            center: objectRegion.depthCenter(displayTransform: displayTransform)
+        ) else { return nil }
 
         let imageSize = frame.camera.imageResolution
         var intrinsics = frame.camera.intrinsics
@@ -91,19 +116,18 @@ final class ProgressiveDepthMeshOverlay {
         intrinsics.columns.2.x *= Float(width) / Float(imageSize.width)
         intrinsics.columns.2.y *= Float(height) / Float(imageSize.height)
 
-        let minX = max(0, Int(Float(width) * 0.18))
-        let maxX = min(width - 1, Int(Float(width) * 0.82))
-        let minY = max(0, Int(Float(height) * 0.14))
-        let maxY = min(height - 1, Int(Float(height) * 0.86))
-        let xs = Array(Swift.stride(from: minX, through: maxX, by: sampleStep))
-        let ys = Array(Swift.stride(from: minY, through: maxY, by: sampleStep))
+        let xs = Array(Swift.stride(from: 0, to: width, by: sampleStep))
+        let ys = Array(Swift.stride(from: 0, to: height, by: sampleStep))
         guard xs.count > 1, ys.count > 1 else { return nil }
 
         let invalid = UInt32.max
         var grid = Array(repeating: invalid, count: xs.count * ys.count)
         var localDepths = Array(repeating: Float.nan, count: xs.count * ys.count)
         var positions: [SIMD3<Float>] = []
+        var colors: [SIMD4<UInt8>] = []
         positions.reserveCapacity(grid.count)
+        colors.reserveCapacity(grid.count)
+        let colorSampler = DepthMeshColorSampler(buffer: frame.capturedImage)
 
         for (row, y) in ys.enumerated() {
             let confidenceLine = confidenceBase?.advanced(by: y * confidenceRowBytes).assumingMemoryBound(to: UInt8.self)
@@ -111,6 +135,13 @@ final class ProgressiveDepthMeshOverlay {
                 if let confidenceLine, confidenceLine[x] < 1 { continue }
                 let distance = depthValue(base: depthBase, rowBytes: depthRowBytes, x: x, y: y, isFloat16: isFloat16)
                 guard distance.isFinite, distance > 0.08, distance < 8,
+                      objectRegion.contains(
+                        depthX: x,
+                        depthY: y,
+                        depthWidth: width,
+                        depthHeight: height,
+                        displayTransform: displayTransform
+                      ),
                       abs(distance - targetDepth) <= 0.35 else { continue }
                 let local = SIMD4<Float>(
                     (Float(x) - intrinsics.columns.2.x) * distance / intrinsics.columns.0.x,
@@ -123,6 +154,8 @@ final class ProgressiveDepthMeshOverlay {
                 grid[gridIndex] = UInt32(positions.count)
                 localDepths[gridIndex] = distance
                 positions.append(SIMD3<Float>(world.x, world.y, world.z))
+                let color = colorSampler.color(depthX: x, depthY: y, depthWidth: width, depthHeight: height)
+                colors.append(SIMD4<UInt8>(color.x, color.y, color.z, 255))
             }
         }
 
@@ -146,6 +179,7 @@ final class ProgressiveDepthMeshOverlay {
         guard positions.count >= 3, indices.count >= 3 else { return nil }
 
         let positionData = positions.withUnsafeBufferPointer { Data(buffer: $0) }
+        let colorData = colors.withUnsafeBufferPointer { Data(buffer: $0) }
         let indexData = indices.withUnsafeBufferPointer { Data(buffer: $0) }
         let source = SCNGeometrySource(
             data: positionData,
@@ -157,10 +191,20 @@ final class ProgressiveDepthMeshOverlay {
             dataOffset: 0,
             dataStride: MemoryLayout<SIMD3<Float>>.stride
         )
+        let colorSource = SCNGeometrySource(
+            data: colorData,
+            semantic: .color,
+            vectorCount: colors.count,
+            usesFloatComponents: false,
+            componentsPerVector: 4,
+            bytesPerComponent: MemoryLayout<UInt8>.size,
+            dataOffset: 0,
+            dataStride: MemoryLayout<SIMD4<UInt8>>.stride
+        )
         let triangleCount = indices.count / 3
         let surface = SCNGeometryElement(data: indexData, primitiveType: .triangles, primitiveCount: triangleCount, bytesPerIndex: MemoryLayout<UInt32>.size)
         let wire = SCNGeometryElement(data: indexData, primitiveType: .triangles, primitiveCount: triangleCount, bytesPerIndex: MemoryLayout<UInt32>.size)
-        let geometry = SCNGeometry(sources: [source], elements: [surface, wire])
+        let geometry = SCNGeometry(sources: [source, colorSource], elements: [surface, wire])
         geometry.materials = [surfaceMaterial(), wireMaterial()]
         return (geometry, triangleCount)
     }
@@ -168,8 +212,10 @@ final class ProgressiveDepthMeshOverlay {
     private func surfaceMaterial() -> SCNMaterial {
         let material = SCNMaterial()
         material.lightingModel = .constant
-        material.diffuse.contents = UIColor.systemTeal.withAlphaComponent(0.18)
-        material.emission.contents = UIColor.systemTeal.withAlphaComponent(0.08)
+        // Per-vertex RGB sampled from ARKit's camera frame makes the measured
+        // surface readable instead of a featureless turquoise veil.
+        material.diffuse.contents = UIColor.white.withAlphaComponent(0.72)
+        material.emission.contents = UIColor.black
         material.isDoubleSided = true
         material.writesToDepthBuffer = false
         return material
@@ -178,17 +224,17 @@ final class ProgressiveDepthMeshOverlay {
     private func wireMaterial() -> SCNMaterial {
         let material = SCNMaterial()
         material.lightingModel = .constant
-        material.diffuse.contents = UIColor.systemTeal.withAlphaComponent(0.92)
-        material.emission.contents = UIColor.systemTeal.withAlphaComponent(0.52)
+        material.diffuse.contents = UIColor.systemTeal.withAlphaComponent(0.58)
+        material.emission.contents = UIColor.systemTeal.withAlphaComponent(0.26)
         material.fillMode = .lines
         material.isDoubleSided = true
         material.writesToDepthBuffer = false
         return material
     }
 
-    private func targetDepth(base: UnsafeMutableRawPointer, rowBytes: Int, width: Int, height: Int, isFloat16: Bool) -> Float? {
-        let centerX = width / 2
-        let centerY = height / 2
+    private func targetDepth(base: UnsafeMutableRawPointer, rowBytes: Int, width: Int, height: Int, isFloat16: Bool, center: CGPoint) -> Float? {
+        let centerX = min(width - 1, max(0, Int(center.x * CGFloat(width))))
+        let centerY = min(height - 1, max(0, Int(center.y * CGFloat(height))))
         var samples: [Float] = []
         for y in max(0, centerY - 5)...min(height - 1, centerY + 5) {
             for x in max(0, centerX - 5)...min(width - 1, centerX + 5) {
@@ -206,6 +252,38 @@ final class ProgressiveDepthMeshOverlay {
             return Float(base.advanced(by: y * rowBytes).assumingMemoryBound(to: Float16.self)[x])
         }
         return base.advanced(by: y * rowBytes).assumingMemoryBound(to: Float.self)[x]
+    }
+}
+
+private final class DepthMeshColorSampler {
+    private let buffer: CVPixelBuffer
+
+    init(buffer: CVPixelBuffer) {
+        self.buffer = buffer
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+    }
+
+    deinit { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+
+    func color(depthX: Int, depthY: Int, depthWidth: Int, depthHeight: Int) -> SIMD3<UInt8> {
+        guard CVPixelBufferGetPlaneCount(buffer) == 2,
+              let yBase = CVPixelBufferGetBaseAddressOfPlane(buffer, 0),
+              let cbcrBase = CVPixelBufferGetBaseAddressOfPlane(buffer, 1) else {
+            return SIMD3(repeating: 180)
+        }
+        let imageWidth = CVPixelBufferGetWidthOfPlane(buffer, 0)
+        let imageHeight = CVPixelBufferGetHeightOfPlane(buffer, 0)
+        let imageX = min(imageWidth - 1, max(0, depthX * imageWidth / depthWidth))
+        let imageY = min(imageHeight - 1, max(0, depthY * imageHeight / depthHeight))
+        let y = Float(yBase.advanced(by: imageY * CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)).assumingMemoryBound(to: UInt8.self)[imageX])
+        let chroma = cbcrBase.advanced(by: (imageY / 2) * CVPixelBufferGetBytesPerRowOfPlane(buffer, 1)).assumingMemoryBound(to: UInt8.self)
+        let cb = Float(chroma[(imageX / 2) * 2]) - 128
+        let cr = Float(chroma[(imageX / 2) * 2 + 1]) - 128
+        return SIMD3(
+            UInt8(max(0, min(255, Int(y + 1.402 * cr)))),
+            UInt8(max(0, min(255, Int(y - 0.344 * cb - 0.714 * cr)))),
+            UInt8(max(0, min(255, Int(y + 1.772 * cb))))
+        )
     }
 }
 

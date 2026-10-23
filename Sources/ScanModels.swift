@@ -1,8 +1,62 @@
 import ARKit
+import CoreGraphics
 import Foundation
 import simd
 
-enum ScanState: Equatable { case idle, recording, paused, finishing, finished, failed(String) }
+enum ScanState: Equatable { case idle, framing, recording, paused, finishing, finished, failed(String) }
+
+/// A user-selected region in normalized preview coordinates. It is converted
+/// through ARFrame's display transform before depth pixels are accepted, so the
+/// exported object is bounded by the area the operator actually chose onscreen.
+struct ObjectScanRegion: Codable, Equatable {
+    var x: CGFloat
+    var y: CGFloat
+    var width: CGFloat
+    var height: CGFloat
+
+    static let initial = ObjectScanRegion(x: 0.28, y: 0.26, width: 0.44, height: 0.48)
+
+    var rect: CGRect { CGRect(x: x, y: y, width: width, height: height) }
+    var center: CGPoint { CGPoint(x: x + width / 2, y: y + height / 2) }
+
+    func moved(by offset: CGSize) -> ObjectScanRegion {
+        ObjectScanRegion(x: x + offset.width, y: y + offset.height, width: width, height: height).clamped()
+    }
+
+    func scaled(by factor: CGFloat) -> ObjectScanRegion {
+        let newWidth = width * factor
+        let newHeight = height * factor
+        return ObjectScanRegion(
+            x: center.x - newWidth / 2,
+            y: center.y - newHeight / 2,
+            width: newWidth,
+            height: newHeight
+        ).clamped()
+    }
+
+    func contains(depthX: Int, depthY: Int, depthWidth: Int, depthHeight: Int, displayTransform: CGAffineTransform) -> Bool {
+        guard depthWidth > 0, depthHeight > 0 else { return false }
+        let imagePoint = CGPoint(x: CGFloat(depthX) / CGFloat(depthWidth), y: CGFloat(depthY) / CGFloat(depthHeight))
+        return rect.contains(imagePoint.applying(displayTransform))
+    }
+
+    func depthCenter(displayTransform: CGAffineTransform) -> CGPoint {
+        center.applying(displayTransform.inverted())
+    }
+
+    private func clamped() -> ObjectScanRegion {
+        let minimum: CGFloat = 0.18
+        let maximum: CGFloat = 0.86
+        let w = min(maximum, max(minimum, width))
+        let h = min(maximum, max(minimum, height))
+        return ObjectScanRegion(
+            x: min(max(0, x), 1 - w),
+            y: min(max(0, y), 1 - h),
+            width: w,
+            height: h
+        )
+    }
+}
 
 enum CaptureProfile: String, CaseIterable, Identifiable {
     case maximumGeometry
@@ -76,6 +130,7 @@ struct ScanManifest: Codable {
     let confidenceFormat = "UInt8 ARConfidenceLevel: 0 low, 1 medium, 2 high"
     var frames: Int
     var roomPlanFile: String?
+    var objectScanRegion: ObjectScanRegion?
 }
 
 struct VoxelKey: Hashable {

@@ -32,8 +32,13 @@ struct CaptureScreen: View {
     private var captureExperience: some View {
         ZStack {
             CameraPreview(view: scanner.sceneView).ignoresSafeArea()
-            if isScanning, scanner.captureTarget == .object {
-                ObjectTargetGuide().ignoresSafeArea().allowsHitTesting(false)
+            if scanner.state == .framing {
+                ObjectAreaPicker(region: scanner.objectScanRegion) { offset in
+                    scanner.moveObjectScanRegion(by: offset)
+                }
+                .ignoresSafeArea()
+            } else if isScanning, scanner.captureTarget == .object {
+                ObjectTargetGuide(region: scanner.objectScanRegion).ignoresSafeArea().allowsHitTesting(false)
             }
             VStack {
                 topBar
@@ -119,7 +124,7 @@ struct CaptureScreen: View {
         guard scanner.liveMeshPasses > 0 else {
             return "LIVE DETAILMESH · eerste gemeten laag wordt opgebouwd"
         }
-        return "LIVE DETAILMESH · pass \(scanner.liveMeshPasses) · \(scanner.liveMeshTriangles) driehoeken"
+        return "LIVE RGB-MESH · pass \(scanner.liveMeshPasses) · \(scanner.liveMeshTriangles) driehoeken"
     }
 
     @ViewBuilder private var bottomPanel: some View {
@@ -137,6 +142,21 @@ struct CaptureScreen: View {
                     Spacer()
                     Button("Start scan", action: scanner.start).buttonStyle(.borderedProminent).controlSize(.large)
                 }
+            }
+        case .framing:
+            panel {
+                Label("Bepaal je scanvak", systemImage: "viewfinder.circle.fill").font(.headline)
+                Text("Sleep het kader naar het voorwerp. Alleen LiDAR-data in dit vak wordt gefuseerd in de live mesh en PLY. Er wordt nog niets opgeslagen.")
+                    .font(.footnote).foregroundStyle(.secondary)
+                HStack {
+                    Button("Kleiner") { scanner.scaleObjectScanRegion(by: 0.84) }.buttonStyle(.bordered)
+                    Button("Groter") { scanner.scaleObjectScanRegion(by: 1.18) }.buttonStyle(.bordered)
+                    Spacer()
+                    Button("Gebruik dit scanvak", action: scanner.confirmObjectRegion)
+                        .buttonStyle(.borderedProminent)
+                }
+                Button("Annuleer", action: scanner.returnToStart)
+                    .font(.caption).foregroundStyle(.secondary)
             }
         case .recording:
             VStack(spacing: 10) {
@@ -188,6 +208,7 @@ struct CaptureScreen: View {
     private var stateTitle: String {
         switch scanner.state {
         case .idle: "Klaar voor LiDAR"
+        case .framing: "Scanvak kiezen"
         case .recording: "Opnemen"
         case .paused: "Gepauzeerd"
         case .finishing: "Opslaan"
@@ -383,28 +404,79 @@ private struct LiveQualityMap: View {
 }
 
 private struct ObjectTargetGuide: View {
+    let region: ObjectScanRegion
     var body: some View {
         GeometryReader { proxy in
-            let width = proxy.size.width * 0.64
-            let height = min(proxy.size.height * 0.46, width * 1.15)
-            VStack(spacing: 8) {
-                Text("PLAATS HET VOORWERP IN DIT KADER")
-                    .font(.caption2.weight(.bold)).tracking(0.7)
-                    .padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(.black.opacity(0.55), in: Capsule())
-                RoundedRectangle(cornerRadius: 22)
-                    .stroke(.white.opacity(0.88), style: StrokeStyle(lineWidth: 2, dash: [10, 8]))
-                    .frame(width: width, height: height)
-                    .overlay(alignment: .bottom) {
-                        Text("Beweeg daarna rustig links en rechts")
-                            .font(.caption.weight(.semibold))
-                            .padding(.horizontal, 10).padding(.vertical, 6)
-                            .background(.black.opacity(0.55), in: Capsule())
-                            .offset(y: 22)
-                    }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            let frame = CGRect(x: region.x * proxy.size.width, y: region.y * proxy.size.height, width: region.width * proxy.size.width, height: region.height * proxy.size.height)
+            RoundedRectangle(cornerRadius: 22)
+                .stroke(.mint.opacity(0.92), style: StrokeStyle(lineWidth: 2, dash: [10, 8]))
+                .frame(width: frame.width, height: frame.height)
+                .position(x: frame.midX, y: frame.midY)
+                .overlay {
+                    Text("SCANVAK ACTIEF · beweeg voor extra hoeken")
+                        .font(.caption2.weight(.bold)).tracking(0.5)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(.black.opacity(0.55), in: Capsule())
+                }
         }
+    }
+}
+
+/// The visible selection is kept in normalized preview coordinates. The
+/// controller converts it through ARKit's display transform before it accepts a
+/// depth sample, avoiding the old wide, room-like object export.
+private struct ObjectAreaPicker: View {
+    let region: ObjectScanRegion
+    let move: (CGSize) -> Void
+    @State private var dragStart: ObjectScanRegion?
+
+    var body: some View {
+        GeometryReader { proxy in
+            let frame = CGRect(
+                x: region.x * proxy.size.width,
+                y: region.y * proxy.size.height,
+                width: region.width * proxy.size.width,
+                height: region.height * proxy.size.height
+            )
+            ZStack {
+                ScanAreaShade(frame: frame).fill(.black.opacity(0.48), style: FillStyle(eoFill: true)).allowsHitTesting(false)
+                RoundedRectangle(cornerRadius: 22)
+                    .stroke(.mint, style: StrokeStyle(lineWidth: 3, dash: [10, 7]))
+                    .frame(width: frame.width, height: frame.height)
+                    .position(x: frame.midX, y: frame.midY)
+                    .overlay {
+                        VStack(spacing: 6) {
+                            Text("ALLEEN DIT SCANVAK")
+                                .font(.caption2.weight(.bold)).tracking(1)
+                            Text("Sleep om te verplaatsen")
+                                .font(.caption2).foregroundStyle(.white.opacity(0.8))
+                        }
+                        .padding(10)
+                        .background(.black.opacity(0.58), in: Capsule())
+                    }
+                    .contentShape(RoundedRectangle(cornerRadius: 22))
+                    .gesture(
+                        DragGesture()
+                            .onChanged { value in
+                                if dragStart == nil { dragStart = region }
+                                guard let dragStart else { return }
+                                let desiredX = dragStart.x + value.translation.width / proxy.size.width
+                                let desiredY = dragStart.y + value.translation.height / proxy.size.height
+                                move(CGSize(width: desiredX - region.x, height: desiredY - region.y))
+                            }
+                            .onEnded { _ in dragStart = nil }
+                    )
+            }
+        }
+    }
+}
+
+private struct ScanAreaShade: Shape {
+    let frame: CGRect
+    func path(in rect: CGRect) -> Path {
+        var path = Path(rect)
+        path.addRoundedRect(in: frame, cornerSize: CGSize(width: 22, height: 22))
+        return path
     }
 }
 
